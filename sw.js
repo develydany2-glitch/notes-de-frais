@@ -1,11 +1,11 @@
 // Service worker : met l'application en cache pour qu'elle s'ouvre sans réseau.
 // Changer VERSION à chaque mise à jour du code pour que les appareils la récupèrent.
-const VERSION = 'v1.0.0';
+const VERSION = 'v1.0.1';
 const CACHE = `notes-de-frais-${VERSION}`;
 const ASSETS = [
   './', './index.html', './styles.css', './manifest.webmanifest',
-  './js/app.js', './js/db.js', './js/sync.js', './js/ics.js',
-  './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png', './icons/icon-maskable-512.png'
+  './app.js', './db.js', './sync.js', './ics.js',
+  './icon-192.png', './icon-512.png', './apple-touch-icon.png', './icon-maskable-512.png'
 ];
 
 self.addEventListener('install', ev => {
