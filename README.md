@@ -85,7 +85,51 @@ Chaque note a trois états : **À déclarer → Déclarée → Remboursée**.
 
 Si vous modifiez un fichier, changez aussi la ligne `const VERSION = 'v1.0.0'` dans `sw.js` (par exemple `v1.0.1`) avant de le renvoyer sur GitHub. L'app proposera alors « Nouvelle version disponible › Mettre à jour ».
 
+## Lecture automatique des tickets (version 1.1)
+
+Après la photo, l'app remplit le montant TTC, la date, le lieu et le type de dépense. Il ne reste qu'à vérifier.
+
+* **Avec du réseau** : l'IA (Claude) lit le ticket, même froissé ou pris de travers.
+* **Sans réseau** : le téléphone lit le ticket lui-même. C'est moins précis sur les tickets abîmés.
+* Un badge sur la photo indique qui a lu le ticket. Les champs remplis automatiquement sont surlignés en orange.
+* Ce que vous avez déjà tapé n'est jamais remplacé.
+* Réglages › Lecture automatique : *Auto (IA)*, *Téléphone* ou *Désactivée*.
+
+**Activer l'IA (une fois) :**
+1. Sur **console.anthropic.com**, créez un compte, ajoutez du crédit (Billing), puis créez une clé (API Keys › Create Key).
+2. Dans Supabase, ouvrez **Edge Functions › Secrets** et ajoutez un secret nommé `ANTHROPIC_API_KEY` qui contient la clé.
+3. Dans Supabase, ouvrez **Edge Functions › Deploy a new function › Via Editor**. Nommez la fonction `lire-ticket`, collez le contenu de `lire-ticket.ts`, puis cliquez sur **Deploy**.
+4. Dans l'app, cliquez sur **Réglages › Tester la lecture IA**.
+
 ---
+
+## Photos, import et paiements sans facture (version 1.2)
+
+* **Plusieurs photos par note** (jusqu'à 6), par exemple le reçu de carte puis la vraie facture. Chaque ligne du tableau affiche la photo, avec le nombre de photos quand il y en a plusieurs. Touchez la photo pour l'ouvrir en grand, glissez pour passer à la suivante, puis « Enregistrer » pour la garder dans Photos ou Fichiers.
+* **Importer des photos** (Accueil ou Tableau) : choisissez une ou plusieurs photos ou captures d'écran du téléphone. L'app crée une note par photo et la lit automatiquement. S'il manque le montant ou le type, la note passe « À compléter ».
+* **Non pris en compte** : pour un paiement réel sans facture (reçu de carte, capture Booking, appli bancaire…). Le montant est gardé à part et n'est jamais compté dans « Reste à rembourser ». Quand la facture arrive, ouvrez la note, ajoutez la photo de la facture et choisissez le vrai type : la note passe « À déclarer ».
+
+**Mise à jour Supabase (une fois)** : dans SQL Editor, lancez
+`alter table public.expenses add column if not exists photos jsonb;`
+puis redéployez la fonction `lire-ticket` avec le nouveau fichier `lire-ticket.ts`.
+
+
+## Déplacements et vue par mois (version 1.5)
+
+L'app n'a plus que deux onglets, avec le bouton **+** au centre. Les Réglages sont sous la roue dentée.
+
+* **Déplacements** : créez un déplacement (nom, dates, transport). Les étapes habituelles sont ajoutées jour par jour : transport, métro, repas, hôtel, et parking dans les « Frais du déplacement ». Touchez une étape pour :
+  * photographier ou importer le ticket : la note est créée et rattachée à l'étape ;
+  * associer une note déjà saisie ;
+  * la marquer « Facture pas encore reçue » : elle apparaît alors dans le pense-bête jusqu'à ce que vous ajoutiez la facture ;
+  * la marquer « Pas de frais ».
+
+  Une note saisie avec le bouton + pendant un déplacement est rattachée automatiquement à l'étape correspondante.
+* **Mois** : la note de frais mois par mois, avec les flèches ‹ › pour changer de mois et l'historique de tous les mois (remboursé ou en attente). Le bouton ⋯ d'une ligne, ou le champ « Note de frais du mois de » dans la note, permet de déclarer un ticket sur le mois précédent ou le mois suivant.
+* **Doublons** : une note ayant la même date et le même montant qu'une autre est signalée à la saisie, ignorée à l'import (avec un bouton « Importer quand même ») et marquée « Doublon ? » dans le mois.
+
+**Mise à jour Supabase (une fois)** : dans Réglages, l'app affiche le texte à copier dans Supabase › SQL Editor. Il est aussi à la fin de `supabase-setup.sql`.
+
 
 ### Contenu du dossier
 

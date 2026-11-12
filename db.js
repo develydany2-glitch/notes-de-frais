@@ -1,7 +1,7 @@
 // Stockage local (IndexedDB) — tout fonctionne hors ligne.
-// Stores : expenses (notes), photos (images des tickets), meta (réglages, état de sync)
+// Stores : expenses (notes), photos (images des tickets), trips (déplacements), meta (réglages, état de sync)
 const DB_NAME = 'notes-de-frais';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let _db;
 
 function openDB() {
@@ -16,6 +16,7 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains('photos')) db.createObjectStore('photos');
       if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+      if (!db.objectStoreNames.contains('trips')) db.createObjectStore('trips', { keyPath: 'id' });
     };
     req.onsuccess = () => { _db = req.result; resolve(_db); };
     req.onerror = () => reject(req.error);
@@ -45,6 +46,12 @@ export const DB = {
   },
   getExpense(id) { return tx('expenses', 'readonly', s => reqP(s.get(id))); },
   putExpense(e) { return tx('expenses', 'readwrite', s => reqP(s.put(e))); },
+  async allTrips({ includeDeleted = false } = {}) {
+    const all = await tx('trips', 'readonly', s => reqP(s.getAll()));
+    return (all || []).filter(t => includeDeleted || !t.deleted);
+  },
+  getTrip(id) { return tx('trips', 'readonly', s => reqP(s.get(id))); },
+  putTrip(t) { return tx('trips', 'readwrite', s => reqP(s.put(t))); },
   putPhoto(id, blob) { return tx('photos', 'readwrite', s => reqP(s.put(blob, id))); },
   getPhoto(id) { return tx('photos', 'readonly', s => reqP(s.get(id))); },
   deletePhoto(id) { return tx('photos', 'readwrite', s => reqP(s.delete(id))); },
