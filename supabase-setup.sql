@@ -19,6 +19,7 @@ create table if not exists public.expenses (
 );
 alter table public.expenses add column if not exists photos jsonb;
 alter table public.expenses add column if not exists month text;
+alter table public.expenses add column if not exists verified boolean;
 create index if not exists expenses_user_updated on public.expenses (user_id, updated_at);
 
 alter table public.expenses enable row level security;

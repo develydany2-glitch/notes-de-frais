@@ -1,6 +1,6 @@
 // Service worker : met l'application en cache pour qu'elle s'ouvre sans réseau.
 // Changer VERSION à chaque mise à jour du code pour que les appareils la récupèrent.
-const VERSION = 'v1.7.1';
+const VERSION = 'v1.8.0';
 const CACHE = `notes-de-frais-${VERSION}`;
 const ASSETS = [
   './', './index.html', './styles.css', './manifest.webmanifest',

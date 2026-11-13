@@ -83,7 +83,7 @@ async function api(cfg, path, opts = {}) {
 const ROW_FIELDS = ['id', 'date', 'category', 'amount', 'place', 'note', 'status', 'reimbursed_on',
   'has_photo', 'photo_path', 'created_at', 'updated_at', 'deleted'];
 // Colonnes ajoutées après la première installation : si la base n'est pas encore mise à jour, on les retire de l'envoi
-const OPTIONAL = { photos: 'needsPhotosColumn', month: 'needsMonthColumn' };
+const OPTIONAL = { photos: 'needsPhotosColumn', month: 'needsMonthColumn', verified: 'needsVerifiedColumn' };
 
 // Liste des photos d'une note (compatible avec l'ancienne version à photo unique)
 export function photosOf(e) {
@@ -100,6 +100,7 @@ function toRow(e, userId, withPhotos) {
   row.photo_path = (photos[0] && photos[0].path) || null;
   if (withPhotos) row.photos = photos.map(p => ({ id: p.id, path: p.path || null }));
   row.month = e.month || null;
+  row.verified = e.verified !== false; // false = lue automatiquement, pas encore relue
   return row;
 }
 
@@ -190,6 +191,7 @@ async function pull(cfg) {
     e.photos = Array.isArray(row.photos) ? row.photos
       : row.has_photo ? [{ id: row.id, path: row.photo_path || null }] : [];
     e.month = row.month || null;
+    e.verified = row.verified === false ? false : (row.verified === true ? true : (local ? local.verified : undefined));
     e.dirty = false; e.photo_dirty = false;
     await DB.putExpense(e);
     n++;

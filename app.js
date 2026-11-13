@@ -34,6 +34,7 @@ const STATUS = {
 const STATUS_ORDER = ['a_declarer', 'declaree', 'remboursee'];
 const SQL_UPDATE = `alter table public.expenses add column if not exists photos jsonb;
 alter table public.expenses add column if not exists month text;
+alter table public.expenses add column if not exists verified boolean;
 create table if not exists public.trips (
   id text primary key,
   user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
@@ -366,7 +367,7 @@ async function viewForm(id, prefill = {}) {
 
       <div class="grid2">
         <label class="field"><span>Date</span><input type="date" id="f-date" class="${autoCls('date')}" value="${e.date}" max="${todayKey()}"></label>
-        <label class="field"><span>Ville / lieu</span><input id="f-place" class="${autoCls('place')}" value="${esc(e.place)}" placeholder="Lyon, Ibis Part-Dieu…" autocomplete="off"></label>
+        <label class="field"><span>Nom du ticket</span><input id="f-place" class="${autoCls('place')}" value="${esc(e.place)}" placeholder="Ex. Brioche Dorée, Ticket métro" autocomplete="off"></label>
       </div>
       ${monthField()}
       <label class="field"><span>Chantier, client ou remarque${autoFilled.has('note') ? ' <em class="auto-tag">d\'après votre planning</em>' : ''}</span><input id="f-note" class="${autoCls('note')}" value="${esc(e.note)}" placeholder="${np ? 'Ex. facture demandée au fournisseur le…' : 'Ex. vérification lignes de vie — client X'}"></label>
@@ -452,6 +453,9 @@ async function viewForm(id, prefill = {}) {
       readForm();
       if (e.amount == null || isNaN(e.amount) || e.amount <= 0) { toast('Indiquez le montant payé.'); $('#f-amount').focus(); return; }
       if (!e.category) { toast('Choisissez le type de dépense.'); return; }
+      const cur = photos[sel] || photos[0];
+      if (!(await reviewSheet(e, cur ? urls[cur.id] : null))) return; // relecture : montant, nom, date
+      e.verified = true;
       const dup = findDuplicate(e, await DB.allExpenses());
       if (dup && !confirm(`Une note de ${eur.format(dup.amount)} du ${dateLabel(dup.date)} existe déjà (« ${dup.place || (CAT[dup.category] || CAT.autre).label} »).\n\nC'est peut-être le même ticket. Enregistrer quand même ?`)) return;
       if (photoChanged) {
@@ -547,17 +551,19 @@ async function viewForm(id, prefill = {}) {
 // ---------------------------------------------------------------- glisser une ligne : → état suivant, ← supprimer
 const swipeHintSeen = () => { try { return localStorage.getItem('swipeHint') === '1'; } catch (_) { return false; } };
 function swipeNext(e) {
+  if (e.verified === false) return { label: 'Vérifier', cls: 'incomplete' };
   if (isIncomplete(e)) return { label: 'Compléter', cls: 'incomplete' };
   if (isNP(e)) return { label: 'Ajouter la facture', cls: 'np' };
   const n = STATUS_ORDER[(STATUS_ORDER.indexOf(e.status) + 1) % 3];
   return { label: STATUS[n], cls: n };
 }
 async function swipeAdvance(e) {
+  if (e.verified === false) { location.hash = '#/relecture'; return; }
   if (isIncomplete(e) || isNP(e)) { location.hash = `#/note/${e.id}`; return; }
   const prev = e.status;
   const next = STATUS_ORDER[(STATUS_ORDER.indexOf(prev) + 1) % 3];
   await setStatus([e.id], next);
-  toast(`${e.place || (CAT[e.category] || CAT.autre).label} : ${STATUS[next]}`, { label: 'Annuler', fn: async () => { await setStatus([e.id], prev); render(); } });
+  toast(`${rowTitle(e)} : ${STATUS[next]}`, { label: 'Annuler', fn: async () => { await setStatus([e.id], prev); render(); } });
   render();
 }
 function bindSwipes(list) {
@@ -567,16 +573,21 @@ function bindSwipes(list) {
     const e = list.find(x => x.id === w.dataset.sw);
     let x0 = 0, y0 = 0, dx = 0, tracking = false, axis = null;
     const reset = () => { row.style.transition = 'transform .22s ease'; row.style.transform = ''; w.classList.remove('to-left', 'to-right', 'armed'); };
+    let press = null;
     row.addEventListener('pointerdown', ev => {
-      if (ev.button > 0 || ev.target.closest('.more')) return;
+      if (ev.button > 0) return;
       x0 = ev.clientX; y0 = ev.clientY; dx = 0; tracking = true; axis = null;
       row.style.transition = 'none';
+      clearTimeout(press);
+      press = setTimeout(() => { if (tracking && !axis) { tracking = false; row.dataset.swiped = '1'; setTimeout(() => { delete row.dataset.swiped; }, 600); openRowMenu(e); } }, 550);
     });
+    row.addEventListener('contextmenu', ev => ev.preventDefault());
     row.addEventListener('pointermove', ev => {
       if (!tracking) return;
       const mx = ev.clientX - x0, my = ev.clientY - y0;
       if (!axis) {
         if (Math.abs(mx) < 8 && Math.abs(my) < 8) return;
+        clearTimeout(press);
         axis = Math.abs(mx) > Math.abs(my) ? 'x' : 'y';
         if (axis === 'y') { tracking = false; return; }
         try { row.setPointerCapture(ev.pointerId); } catch (_) {}
@@ -587,6 +598,7 @@ function bindSwipes(list) {
       w.classList.toggle('armed', Math.abs(dx) > LIMIT);
     });
     const end = async () => {
+      clearTimeout(press);
       if (!tracking) return;
       tracking = false;
       if (axis !== 'x') return;
@@ -623,7 +635,22 @@ function openRowMenu(e) {
   if (cur !== nat) items.push({ ico: '↺', label: `Revenir en ${monthLabel(nat)}`, sub: 'Le mois du ticket', fn: async () => { d.close(); await moveToMonth(e, nat); render(); } });
   items.push({ ico: '✎', label: 'Ouvrir la note', fn: () => { d.close(); location.hash = `#/note/${e.id}`; } });
   items.push({ ico: '🗑', label: 'Supprimer la note', sub: 'Elle ira dans l\'historique des suppressions', danger: true, fn: async () => { if (await deleteExpense(e)) render(); } });
-  menuSheet(`${esc(e.place || (CAT[e.category] || CAT.autre).label)} · ${e.amount > 0 ? eur.format(e.amount) : '— €'}`, items);
+  menuSheet(`${esc(rowTitle(e))} · ${esc(rowName(e))} · ${e.amount > 0 ? eur.format(e.amount) : '— €'}`, items);
+}
+
+// Libellés de ligne : « Métro · 03/11 » en titre, le nom du ticket en dessous
+const shortDate = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) : '';
+const rowTitle = e => `${e.category ? (CAT[e.category] || CAT.autre).label : 'Ticket'} · ${shortDate(e.date)}`;
+const rowName = e => e.place || 'Nom à compléter';
+
+function openMonthsSheet(all, current) {
+  const months = [...new Set([...all.map(mOf), monthKey(todayKey())])].sort().reverse();
+  const d = $('#sheet');
+  menuSheet('Choisir un mois', months.map(mk => {
+    const x = sums(all.filter(e => mOf(e) === mk));
+    const left = x.total - x.remboursee;
+    return { ico: mk === current ? '✓' : '', label: monthName(mk), sub: x.total ? (left < 0.005 ? `Tout remboursé · ${eur.format(x.total)}` : `${eur.format(left)} en attente sur ${eur.format(x.total)}`) : 'Aucune note', fn: () => { d.close(); location.hash = `#/mois?m=${mk}`; } };
+  }));
 }
 
 async function viewMonth(params) {
@@ -631,126 +658,186 @@ async function viewMonth(params) {
   const m = params.get('m') || monthKey(todayKey());
   const filter = params.get('f') || 'tout';
   const dups = duplicateIds(all);
-  const nDeleted = (await deletedItems()).length;
   const inMonth = all.filter(e => mOf(e) === m);
-  const nInc = inMonth.filter(isIncomplete).length, nDup = inMonth.filter(e => dups.has(e.id)).length;
-  const FILTERS = [['tout', 'Tout'], ...(nInc ? [['incomplete', `À compléter · ${nInc}`]] : []), ...STATUS_ORDER.map(s => [s, STATUS[s]]), [NP, 'Non pris en compte'], ...(nDup ? [['doublons', `Doublons ? · ${nDup}`]] : [])];
-  const list = filter === 'tout' ? inMonth : filter === 'incomplete' ? inMonth.filter(isIncomplete) : filter === NP ? inMonth.filter(isNP)
-    : filter === 'doublons' ? inMonth.filter(e => dups.has(e.id)) : inMonth.filter(e => !isNP(e) && e.status === filter);
+  const FILTERS = [['tout', 'Tout'], ...STATUS_ORDER.map(s => [s, STATUS[s]]), [NP, 'Non pris en compte']];
+  const list = (filter === 'tout' ? inMonth : filter === 'incomplete' ? inMonth.filter(isIncomplete) : filter === NP ? inMonth.filter(isNP)
+    : filter === 'doublons' ? inMonth.filter(e => dups.has(e.id)) : filter === 'verifier' ? inMonth.filter(e => e.verified === false)
+    : inMonth.filter(e => !isNP(e) && e.status === filter))
+    .sort((a, b) => b.date.localeCompare(a.date) || b.created_at.localeCompare(a.created_at));
   const s = sums(inMonth);
-  const pending = all.filter(e => !isNP(e) && e.status !== 'remboursee');
-  const pendingSum = pending.reduce((a, e) => a + (e.amount || 0), 0);
-  const [whole, cents] = eurParts(pendingSum).split(',');
+  const pendingSum = all.filter(e => !isNP(e) && e.status !== 'remboursee').reduce((a, e) => a + (e.amount || 0), 0);
   const pl = (n, a, b) => n > 1 ? b : a;
   const thumbs = {};
   await Promise.all(list.filter(e => photosOf(e).length).map(async e => { thumbs[e.id] = await photoUrl(e); }));
 
-  // alertes
-  const alerts = [];
-  const allInc = all.filter(isIncomplete).length;
-  if (allInc) alerts.push(`<a class="alert" href="#/mois?m=${mOf(all.find(isIncomplete))}&f=incomplete"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4"/></svg><div><b>${allInc} ${pl(allInc, 'note', 'notes')} à compléter</b><p>Il manque le montant ou le type de dépense.</p></div></a>`);
-  const { waiting, overdue } = await tripReminders();
-  if (waiting.length) alerts.push(`<a class="alert" href="#/deplacements"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><div><b>${waiting.length} ${pl(waiting.length, 'facture attendue', 'factures attendues')}</b><p>${esc(waiting.slice(0, 2).map(w => w.step.label + (w.day ? ' ' + dateLabel(w.day) : '')).join(', '))}${waiting.length > 2 ? '…' : ''}</p></div></a>`);
-  if (overdue.length) alerts.push(`<a class="alert" href="#/deplacements"><svg viewBox="0 0 24 24"><path d="M12 3 2 20h20zM12 10v4M12 17v.5"/></svg><div><b>${overdue.length} ${pl(overdue.length, 'étape passée', 'étapes passées')} sans justificatif</b><p>Dans vos déplacements : ajoutez le ticket ou indiquez « pas de frais ».</p></div></a>`);
-  const allDup = dups.size;
-  if (allDup) alerts.push(`<a class="alert" href="#/mois?m=${mOf(all.find(e => dups.has(e.id)))}&f=doublons"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><div><b>${allDup} notes en doublon possible</b><p>Même date et même montant : vérifiez qu'un ticket n'a pas été saisi deux fois.</p></div></a>`);
-  const oldDeclared = all.filter(e => !isNP(e) && e.status === 'declaree' && daysBetween(new Date(e.date), new Date()) > 45);
-  if (oldDeclared.length) alerts.push(`<a class="alert" href="#/mois?m=${mOf(oldDeclared[0])}&f=declaree"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><div><b>${oldDeclared.length} ${pl(oldDeclared.length, 'note déclarée', 'notes déclarées')} depuis plus de 45 jours</b><p>Toujours pas remboursée${pl(oldDeclared.length, '', 's')} : vérifiez votre fiche de paie.</p></div></a>`);
+  // « À traiter » : uniquement ce qui concerne les notes et leur remboursement (les rappels de déplacement restent dans Déplacements)
+  const todo = [];
+  const nVer = all.filter(e => e.verified === false).length;
+  if (nVer) todo.push({ ico: '🔍', label: `${nVer} ${pl(nVer, 'note', 'notes')} à vérifier`, sub: 'Montant, nom et date lus automatiquement', href: '#/relecture' });
+  const inc = all.filter(isIncomplete);
+  if (inc.length) todo.push({ ico: '✎', label: `${inc.length} ${pl(inc.length, 'note', 'notes')} à compléter`, sub: 'Montant ou type manquant', href: `#/mois?m=${mOf(inc[0])}&f=incomplete` });
+  if (dups.size) { const first = all.find(e => dups.has(e.id)); todo.push({ ico: '⧉', label: `${dups.size} doublons possibles`, sub: 'Même date et même montant', href: `#/mois?m=${mOf(first)}&f=doublons` }); }
+  const old = all.filter(e => !isNP(e) && e.status === 'declaree' && daysBetween(new Date(e.date), new Date()) > 45);
+  if (old.length) todo.push({ ico: '⏱', label: `${old.length} ${pl(old.length, 'note déclarée', 'notes déclarées')} il y a plus de 45 jours`, sub: 'Toujours pas remboursée' + pl(old.length, '', 's'), href: `#/mois?m=${mOf(old[0])}&f=declaree` });
 
-  // historique des mois (pour vérifier chaque remboursement)
-  const months = [...new Set(all.map(mOf))].sort().reverse();
-  const byDay = {};
-  list.sort((a, b) => b.date.localeCompare(a.date) || b.created_at.localeCompare(a.created_at)).forEach(e => { (byDay[e.date] = byDay[e.date] || []).push(e); });
   const pPaid = s.total ? s.remboursee / s.total * 100 : 0, pSent = s.total ? s.declaree / s.total * 100 : 0;
-  const bulkable = inMonth.filter(e => !isNP(e) && !isIncomplete(e));
+  const bulkable = inMonth.filter(e => !isNP(e) && !isIncomplete(e) && e.verified !== false);
+  const special = { incomplete: 'Notes à compléter', doublons: 'Doublons possibles', verifier: 'Notes à vérifier' }[filter];
   const row = e => {
-    const c = CAT[e.category] || CAT.autre;
     const moved = e.month && e.month !== monthKey(e.date);
     const nxt = swipeNext(e);
     return `<div class="swipe" data-sw="${e.id}">
       <div class="sw-bg sw-next ${nxt.cls}" aria-hidden="true">${nxt.label} →</div>
       <div class="sw-bg sw-del" aria-hidden="true">Supprimer 🗑</div>
       <div class="row" data-id="${e.id}">
-      ${thumbHtml(e, thumbs[e.id])}
-      <span style="min-width:0"><div class="t">${esc(e.place || (e.category ? c.label : 'Ticket importé'))}</div>
-        <div class="s">${e.category && !isNP(e) ? esc(c.label) : ''}${moved ? `${e.category && !isNP(e) ? ' · ' : ''}<span class="moved">ticket ${monthKey(e.date) < m ? 'du mois précédent' : 'du mois suivant'}</span>` : ''}${photosOf(e).length ? '' : ' · <span style="color:var(--danger)">sans photo</span>'}</div></span>
-      <span class="r"><div class="amount${isNP(e) ? ' np-amt' : ''}">${e.amount > 0 ? eur.format(e.amount) : '— €'}${e.dirty ? '<i class="unsynced" title="Pas encore synchronisée"></i>' : ''}</div>
-        <span class="pills">${dups.has(e.id) ? '<span class="pill dup">Doublon ?</span>' : ''}${pillHtml(e, true)}</span></span>
-      <button class="more" data-more="${e.id}" aria-label="Actions : changer de mois, supprimer">⋯</button>
-    </div></div>`;
+        ${thumbHtml(e, thumbs[e.id])}
+        <span style="min-width:0"><div class="t">${esc(rowTitle(e))}</div>
+          <div class="s">${esc(rowName(e))}${moved ? ` · <span class="moved">ticket ${monthKey(e.date) < m ? 'du mois précédent' : 'du mois suivant'}</span>` : ''}${photosOf(e).length ? '' : ' · <span style="color:var(--danger)">sans photo</span>'}</div></span>
+        <span class="r"><div class="amount${isNP(e) ? ' np-amt' : ''}">${e.amount > 0 ? eur.format(e.amount) : '— €'}${e.dirty ? '<i class="unsynced" title="Pas encore synchronisée"></i>' : ''}</div>
+          <span class="pills">${e.verified === false ? '<span class="pill verify">À vérifier</span>' : dups.has(e.id) ? '<span class="pill dup">Doublon ?</span>' : pillHtml(e, true)}</span></span>
+      </div></div>`;
   };
 
   view.className = '';
   view.innerHTML = `
-    <div class="topbar"><div><h1>Notes de frais</h1></div>${topRight()}</div>
+    <div class="topbar month-top">
+      <button class="month-title" data-months aria-label="Choisir un mois"><h1>${monthName(m)}</h1><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+      ${topRight()}
+    </div>
     <div class="month-grid">
       <div class="mg-a">
-        <div class="ticket compact">
-          <div class="label">Reste à vous rembourser</div>
-          <div class="big num">${whole}<small>,${cents} €</small></div>
-          <div class="meta">${pending.length} ${pl(pending.length, 'note', 'notes')} en attente, tous mois confondus</div>
-          ${s.npCount || all.some(isNP) ? `<a class="np-line" href="#/mois?m=${m}&f=${NP}"><span>⏸️ Non pris en compte, sans facture</span><b class="num">${eur.format(sums(all).np)}</b></a>` : ''}
+        <div class="ticket compact month-card">
+          <div class="mc-head"><div><div class="label">Total du mois</div><div class="big num">${eurParts(s.total).split(',')[0]}<small>,${eurParts(s.total).split(',')[1]} €</small></div></div>
+            <div class="mc-nav"><a class="btn" href="#/mois?m=${shiftMonth(m, -1)}" aria-label="Mois précédent">‹</a><a class="btn" href="#/mois?m=${shiftMonth(m, 1)}" aria-label="Mois suivant">›</a></div></div>
+          <div class="progress" aria-hidden="true"><i class="p1" style="width:${pPaid}%"></i><i class="p2" style="width:${pSent}%"></i></div>
+          <div class="split">
+            <div>Remboursé<b class="num">${eur.format(s.remboursee)}</b></div>
+            <div>Déclaré<b class="num">${eur.format(s.declaree)}</b></div>
+            <div>À déclarer<b class="num">${eur.format(s.a_declarer)}</b></div>
+          </div>
+          <div class="mc-foot">
+            <span>Reste à rembourser, tous mois : <b class="num">${eur.format(pendingSum)}</b></span>
+            ${bulkable.some(e => e.status !== 'remboursee') ? '<button class="linkish" data-bulkmenu>Tout marquer…</button>' : ''}
+          </div>
+          ${s.npCount ? `<a class="np-line" href="#/mois?m=${m}&f=${NP}"><span>⏸️ Non pris en compte, sans facture</span><b class="num">${eur.format(s.np)}</b></a>` : ''}
         </div>
-        ${alerts.join('')}
-      </div>
-      <div class="mg-c">
-        <div class="section-title"><h2>Tous les mois</h2></div>
-        <div class="list months-list">${months.length ? months.map(mk => {
-          const x = sums(all.filter(e => mOf(e) === mk));
-          const left = x.total - x.remboursee;
-          return `<a class="row${mk === m ? ' on' : ''}" href="#/mois?m=${mk}"><span class="cat-ico mo">${(([y, mo]) => new Date(y, mo - 1, 1).toLocaleDateString('fr-FR', { month: 'short' }))(mk.split('-').map(Number))}</span><span style="min-width:0"><div class="t">${monthName(mk)}</div><div class="s">Remboursé ${eur.format(x.remboursee)} sur ${eur.format(x.total)}</div></span>
-            <span class="r">${x.total && left < 0.005 ? '<span class="pill remboursee">Tout remboursé</span>' : x.total ? `<span class="pill a_declarer">${eur.format(left)} en attente</span>` : '<span class="pill none">Rien à rembourser</span>'}</span></a>`;
-        }).join('') : '<div class="empty">Aucune note pour l\'instant.</div>'}</div>
+        ${todo.length ? `<div class="section-title"><h2>À traiter</h2></div><div class="list todo-list">${todo.map(t => `<a class="row" href="${t.href}"><span class="cat-ico">${t.ico}</span><span style="min-width:0"><div class="t">${t.label}</div><div class="s">${t.sub}</div></span><span class="r"></span></a>`).join('')}</div>` : ''}
       </div>
       <div class="mg-b">
-        <div class="month-nav">
-          <a class="btn" href="#/mois?m=${shiftMonth(m, -1)}" aria-label="Mois précédent">‹</a>
-          <h2>${monthName(m)}</h2>
-          <a class="btn" href="#/mois?m=${shiftMonth(m, 1)}" aria-label="Mois suivant">›</a>
-        </div>
-        <section class="month">
-          <div class="month-head">
-            <div><div class="muted">${inMonth.length} note${inMonth.length > 1 ? 's' : ''}${s.nophoto ? ` · <span style="color:var(--danger)">${s.nophoto} sans photo</span>` : ''}</div></div>
-            <div class="tot num">${eur.format(s.total)}</div>
-            <div class="progress" aria-hidden="true"><i class="p1" style="width:${pPaid}%"></i><i class="p2" style="width:${pSent}%"></i></div>
-            <div class="legend"><span>Remboursé <b class="num">${eur.format(s.remboursee)}</b></span><span>Déclaré <b class="num">${eur.format(s.declaree)}</b></span><span>À déclarer <b class="num">${eur.format(s.a_declarer)}</b></span>${s.npCount ? `<span class="np-leg">Non pris en compte <b class="num">${eur.format(s.np)}</b></span>` : ''}</div>
-            ${bulkable.some(e => e.status !== 'remboursee') ? `<div class="month-actions">
-              ${bulkable.some(e => e.status === 'a_declarer') ? '<button class="btn btn-small" data-bulk="declaree">Tout marquer déclaré</button>' : ''}
-              <button class="btn btn-small" data-bulk="remboursee">Tout marquer remboursé</button></div>` : ''}
-          </div>
-        </section>
-        <div class="toolbar">
-          <div class="filter-chips" id="flt">${FILTERS.map(([k, l]) => `<button class="chip${k === NP ? ' chip-np' : ''}" data-f="${k}" aria-pressed="${filter === k}">${l}</button>`).join('')}</div>
-        </div>
-        ${Object.keys(byDay).length && !swipeHintSeen() ? '<div class="swipe-hint" id="sw-hint"><span>Glissez une ligne <b>→</b> pour passer à l\'état suivant, <b>←</b> pour la supprimer.</span><button class="linkish" id="sw-hint-ok">OK</button></div>' : ''}
-        ${Object.keys(byDay).length ? Object.entries(byDay).map(([d, items]) => `<div class="day-label">${longDay(d)}</div><div class="list">${items.map(row).join('')}</div>`).join('')
-          : `<div class="list empty"><b>${filter === 'tout' ? `Aucune note en ${monthLabel(m)}` : 'Aucune note dans cette catégorie'}</b>${filter === 'tout' ? 'Touchez le bouton + pour photographier ou importer un ticket.' : ''}</div>`}
-        <div class="btn-row" style="margin-top:16px"><button class="btn btn-small" data-action="import">Importer des photos</button><button class="btn btn-small" data-action="csv">Exporter pour Excel</button>${nDeleted ? `<a class="btn btn-small" href="#/historique">Historique des suppressions · ${nDeleted}</a>` : ''}</div>
+        ${special ? `<div class="filter-head"><h2>${special}</h2><a class="linkish" href="#/mois?m=${m}">Tout afficher</a></div>`
+          : `<div class="filter-chips" id="flt">${FILTERS.map(([k, l]) => `<button class="chip${k === NP ? ' chip-np' : ''}" data-f="${k}" aria-pressed="${filter === k}">${l}</button>`).join('')}</div>`}
+        ${list.length && !swipeHintSeen() ? '<div class="swipe-hint" id="sw-hint"><span>Glissez <b>→</b> pour l\'état suivant, <b>←</b> pour supprimer. Appui long : changer de mois.</span><button class="linkish" id="sw-hint-ok">OK</button></div>' : ''}
+        ${list.length ? `<div class="list">${list.map(row).join('')}</div>`
+          : `<div class="list empty"><b>${filter === 'tout' ? `Aucune note en ${monthLabel(m)}` : 'Aucune note ici'}</b>${filter === 'tout' ? 'Touchez « Ajouter » pour photographier ou importer un ticket.' : ''}</div>`}
       </div>
     </div>`;
 
-  $$('#flt button').forEach(b => b.onclick = () => { location.hash = `#/mois?m=${m}${b.dataset.f === 'tout' ? '' : '&f=' + b.dataset.f}`; });
+  const fl = $$('#flt button');
+  fl.forEach(b => b.onclick = () => { location.hash = `#/mois?m=${m}${b.dataset.f === 'tout' ? '' : '&f=' + b.dataset.f}`; });
   const on = $('#flt [aria-pressed="true"]'); if (on) on.scrollIntoView({ inline: 'center', block: 'nearest' });
+  $('[data-months]').onclick = () => openMonthsSheet(all, m);
   bindRows(all);
   bindSwipes(all);
   const hint = $('#sw-hint-ok'); if (hint) hint.onclick = () => { try { localStorage.setItem('swipeHint', '1'); } catch (_) {} $('#sw-hint').remove(); };
-  $$('[data-more]').forEach(b => b.onclick = ev => { ev.stopPropagation(); openRowMenu(all.find(e => e.id === b.dataset.more)); });
   $$('[data-cycle]').forEach(b => b.onclick = async ev => {
     ev.stopPropagation();
-    const e = await DB.getExpense(b.dataset.cycle);
-    const next = STATUS_ORDER[(STATUS_ORDER.indexOf(e.status) + 1) % 3];
-    await setStatus([e.id], next);
-    toast(`Statut : ${STATUS[next]}`);
-    render();
+    const e = all.find(x => x.id === b.dataset.cycle);
+    await swipeAdvance(e);
   });
-  $$('[data-bulk]').forEach(b => b.onclick = async () => {
-    const target = b.dataset.bulk;
-    const ids = bulkable.filter(e => STATUS_ORDER.indexOf(e.status) < STATUS_ORDER.indexOf(target)).map(e => e.id);
-    if (!confirm(`Marquer ${ids.length} note${ids.length > 1 ? 's' : ''} de ${monthLabel(m)} comme « ${STATUS[target]} » ?\nLes paiements non pris en compte et les notes à compléter ne sont pas modifiés.`)) return;
-    await setStatus(ids, target);
-    toast(`${monthName(m)} : ${STATUS[target].toLowerCase()}`);
-    render();
+  const bm = $('[data-bulkmenu]');
+  if (bm) bm.onclick = () => {
+    const d = $('#sheet');
+    const go = async target => {
+      const ids = bulkable.filter(e => STATUS_ORDER.indexOf(e.status) < STATUS_ORDER.indexOf(target)).map(e => e.id);
+      if (!(await confirmSheet({ title: `Tout marquer « ${STATUS[target]} » ?`, text: `${ids.length} note${ids.length > 1 ? 's' : ''} de ${monthLabel(m)}. Les notes à vérifier, à compléter ou non prises en compte ne sont pas modifiées.`, ok: `Marquer ${STATUS[target].toLowerCase()}`, danger: false }))) return;
+      await setStatus(ids, target); toast(`${monthName(m)} : ${STATUS[target].toLowerCase()}`); render();
+    };
+    const items = [];
+    if (bulkable.some(e => e.status === 'a_declarer')) items.push({ ico: '📨', label: 'Tout marquer déclaré', fn: () => go('declaree') });
+    items.push({ ico: '✓', label: 'Tout marquer remboursé', fn: () => go('remboursee') });
+    menuSheet(monthName(m), items);
+  };
+}
+
+// ---------------------------------------------------------------- relecture des montants, noms et dates
+// 1) Récapitulatif avant chaque enregistrement d'une note
+async function reviewSheet(e, imgUrl) {
+  const d = $('#sheet');
+  if (d.open) { d.onclose = null; d.close(); await new Promise(r => setTimeout(r, 30)); }
+  const c = CAT[e.category] || CAT.autre;
+  return new Promise(resolve => {
+    d.className = 'sheet menu';
+    d.innerHTML = `<div class="menu-box confirm review" role="dialog" aria-labelledby="rv-t">
+      <h2 id="rv-t">Vérifiez avant d'enregistrer</h2>
+      <div class="rv-body">
+        ${imgUrl ? `<img src="${imgUrl}" alt="Photo du ticket" class="rv-img">` : '<div class="rv-img rv-noimg">Pas de photo</div>'}
+        <dl>
+          <dt>Montant</dt><dd class="rv-amt">${eur.format(e.amount || 0)}</dd>
+          <dt>Nom</dt><dd>${esc(e.place || '— (à compléter)')}</dd>
+          <dt>Date</dt><dd>${longDay(e.date)}</dd>
+          <dt>Type</dt><dd>${c.ico} ${esc(c.label)}</dd>
+          ${e.month && e.month !== monthKey(e.date) ? `<dt>Déclarée en</dt><dd>${monthLabel(e.month)}</dd>` : ''}
+        </dl>
+      </div>
+      <div class="confirm-actions"><button class="btn" data-no>Corriger</button><button class="btn btn-primary" data-yes>C'est juste, enregistrer</button></div></div>`;
+    let done = false;
+    const finish = v => { if (done) return; done = true; d.onclose = null; if (d.open) d.close(); resolve(v); };
+    d.querySelector('[data-no]').onclick = () => finish(false);
+    d.querySelector('[data-yes]').onclick = () => finish(true);
+    d.onclick = ev => { if (ev.target === d) finish(false); };
+    d.onclose = () => finish(false);
+    d.showModal();
+    d.querySelector('[data-yes]').focus();
   });
+}
+
+// 2) Écran de relecture : les notes « À vérifier » une par une (photo + montant, nom, date, type)
+async function viewReview(params) {
+  const queue = (await DB.allExpenses()).filter(e => e.verified === false).sort((a, b) => a.date.localeCompare(b.date) || a.created_at.localeCompare(b.created_at));
+  const total = +(params.get('n') || queue.length);
+  view.className = 'narrow';
+  if (!queue.length) {
+    view.innerHTML = `<div class="topbar"><button class="back" data-back><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>Mois</button></div>
+      <h1>Relecture</h1>
+      <div class="list empty" style="margin-top:16px"><b>Tout est vérifié ✓</b>Les montants, noms et dates de toutes vos notes ont été relus.</div>`;
+    $('[data-back]').onclick = () => { location.hash = '#/mois'; };
+    return;
+  }
+  const e = queue[0];
+  const urls = await Promise.all(photosOf(e).map(photoUrlOf));
+  const pos = Math.max(1, total - queue.length + 1);
+  view.innerHTML = `
+    <div class="topbar"><button class="back" data-back><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>Mois</button><span class="muted rv-pos">${pos} sur ${total}</span></div>
+    <h1>Relecture</h1>
+    <p class="muted" style="margin:4px 0 14px">Comparez avec la photo, corrigez si besoin, puis validez.</p>
+    <div class="photo-zone">${urls[0] ? `<img src="${urls[0]}" alt="Photo du ticket" id="rv-photo">` : '<div class="ph-missing">Photo indisponible hors ligne</div>'}</div>
+    <div class="card"><label class="amount-input"><input id="r-amount" inputmode="decimal" value="${e.amount != null ? e.amount.toFixed(2).replace('.', ',') : ''}" placeholder="0,00" aria-label="Montant TTC"><span>€</span></label></div>
+    <label class="field"><span>Nom du ticket</span><input id="r-place" value="${esc(e.place)}" placeholder="Ex. Brioche Dorée, Ticket métro"></label>
+    <label class="field"><span>Date</span><input type="date" id="r-date" value="${e.date}" max="${todayKey()}"></label>
+    <div class="field"><span>Type de dépense</span><div class="chips" id="r-cat">${CATS.map(c => `<button type="button" class="chip${c.id === NP ? ' chip-np' : ''}" data-cat="${c.id}" aria-pressed="${e.category === c.id}">${c.ico} ${c.label}</button>`).join('')}</div></div>
+    <div class="form-actions">
+      <button class="btn" data-skip>Plus tard</button>
+      <button class="btn btn-primary" data-ok>Valider</button>
+    </div>`;
+  let cat = e.category;
+  $('[data-back]').onclick = () => { location.hash = '#/mois'; };
+  const ph = $('#rv-photo'); if (ph) ph.onclick = () => openGallery(urls, 0, rowTitle(e));
+  $$('#r-cat .chip').forEach(b => b.onclick = () => { cat = b.dataset.cat; $$('#r-cat .chip').forEach(x => x.setAttribute('aria-pressed', x === b)); });
+  $('[data-skip]').onclick = async () => {
+    // remise en fin de file : on la marque vérifiable plus tard sans la valider
+    e.created_at = new Date().toISOString(); await DB.putExpense(e);
+    location.hash = `#/relecture?n=${total}&t=${Date.now()}`;
+  };
+  $('[data-ok]').onclick = async () => {
+    const raw = $('#r-amount').value.replace(/\s/g, '').replace(',', '.');
+    const amount = raw === '' ? null : Math.round(parseFloat(raw) * 100) / 100;
+    if (!(amount > 0)) { toast('Indiquez le montant du ticket.'); $('#r-amount').focus(); return; }
+    if (!cat) { toast('Choisissez le type de dépense.'); return; }
+    Object.assign(e, { amount, place: $('#r-place').value.trim(), date: $('#r-date').value || e.date, category: cat, verified: true });
+    await saveExpense(e);
+    toast('Note vérifiée ✓');
+    location.hash = `#/relecture?n=${total}&t=${Date.now()}`;
+  };
 }
 
 // ---------------------------------------------------------------- import de photos du téléphone
@@ -771,8 +858,8 @@ async function importPhotos(files) {
   const show = (row, e) => {
     const c = CAT[e.category] || CAT.autre;
     row.dataset.note = e.id;
-    row.querySelector('.t').textContent = e.place || (e.category ? c.label : 'Ticket importé');
-    row.querySelector('.s').textContent = `${dateLabel(e.date)}${e.category && !isNP(e) ? ' · ' + c.label : ''}`;
+    row.querySelector('.t').textContent = rowTitle(e);
+    row.querySelector('.s').textContent = rowName(e);
     row.querySelector('.r').innerHTML = `<div class="amount">${e.amount ? eur.format(e.amount) : '— €'}</div>${pillHtml(e)}`;
   };
   const save = async (e, pid, blob) => {
@@ -788,7 +875,7 @@ async function importPhotos(files) {
     try { blob = await compressImage(files[i]); } catch (_) { row.querySelector('.s').textContent = 'Image illisible, ignorée'; row.querySelector('.cat-ico').textContent = '⚠️'; continue; }
     row.querySelector('.cat-ico').innerHTML = `<img src="${trackUrl(URL.createObjectURL(blob))}" alt="">`;
     const pid = uid();
-    const e = { id: uid(), date: todayKey(), category: '', amount: null, place: '', note: '', status: 'a_declarer', reimbursed_on: null, photos: [{ id: pid, path: null }], has_photo: true, photo_path: null, created_at: new Date().toISOString(), deleted: false };
+    const e = { id: uid(), date: todayKey(), category: '', amount: null, place: '', note: '', status: 'a_declarer', reimbursed_on: null, photos: [{ id: pid, path: null }], has_photo: true, photo_path: null, created_at: new Date().toISOString(), deleted: false, verified: false };
     const taken = files[i].lastModified ? dayKey(new Date(files[i].lastModified)) : null;
     if (taken && taken <= todayKey() && daysBetween(new Date(taken), new Date()) < 400) e.date = taken;
     try {
@@ -816,8 +903,8 @@ async function importPhotos(files) {
   }
   $('#imp-sub').textContent = `${created} note${created > 1 ? 's' : ''} créée${created > 1 ? 's' : ''}${toFix ? `, dont ${toFix} à compléter` : ''}${skipped ? ` · ${skipped} doublon${skipped > 1 ? 's' : ''} non importé${skipped > 1 ? 's' : ''}` : ''}${linked ? ` · ${linked} rattachée${linked > 1 ? 's' : ''} à vos déplacements` : ''}. Touchez une ligne pour la vérifier.`;
   const done = $('#imp-done');
-  done.disabled = false; done.textContent = toFix ? 'Compléter les notes' : 'Voir le mois';
-  done.onclick = () => { d.close(); location.hash = toFix ? '#/mois?f=incomplete' : '#/mois'; render(); };
+  done.disabled = false; done.textContent = created ? 'Vérifier les montants' : 'Voir le mois';
+  done.onclick = () => { d.close(); location.hash = created ? `#/relecture?t=${Date.now()}` : '#/mois'; render(); };
   $$('#imp-list [data-note]').forEach(r => r.onclick = ev => { if (ev.target.closest('[data-force]')) return; d.close(); location.hash = `#/note/${r.dataset.note}`; });
   refreshBadges();
 }
@@ -832,7 +919,7 @@ async function viewSettings() {
   try { est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null; } catch (_) {}
   const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   const ocrMode = await OCR.getMode();
-  const needsCol = connected && ((await DB.getMeta('needsPhotosColumn', false)) || (await DB.getMeta('needsMonthColumn', false)) || (await DB.getMeta('needsTripsTable', false)));
+  const needsCol = connected && ((await DB.getMeta('needsPhotosColumn', false)) || (await DB.getMeta('needsMonthColumn', false)) || (await DB.getMeta('needsVerifiedColumn', false)) || (await DB.getMeta('needsTripsTable', false)));
   const prefs = await DB.getMeta('reminder', { weekday: 5, time: '16:30', interval: 2 });
   const nDel = (await deletedItems()).length;
   const days = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
@@ -915,7 +1002,7 @@ async function viewSettings() {
       <h3 style="margin-top:8px">Sur le PC</h3>
       <p class="muted" style="margin-top:4px">Ouvrez la même adresse dans Edge ou Chrome, puis menu ⋯ › Applications › Installer cette application.</p>
     </div>
-    <p class="muted" style="text-align:center;margin-top:18px">Version 1.7.1 · <button class="linkish" id="upd" style="font-size:14px">Rechercher une mise à jour</button></p>`;
+    <p class="muted" style="text-align:center;margin-top:18px">Version 1.8 · <button class="linkish" id="upd" style="font-size:14px">Rechercher une mise à jour</button></p>`;
 
   const lg = $('#login');
   if (lg) lg.onclick = async () => {
@@ -1089,24 +1176,19 @@ async function viewTrips() {
   const { waiting, overdue } = await tripReminders();
   const today = todayKey();
   const label = t => t.title || `Déplacement du ${dateLabel(t.start)}`;
-  const since = d => { const n = daysBetween(new Date(d + 'T12:00'), new Date()); return n <= 0 ? "aujourd'hui" : n === 1 ? 'depuis hier' : `depuis ${n} jours`; };
+  const since = d => { const n = daysBetween(new Date(d + 'T12:00'), new Date()); return n <= 0 ? "aujourd'hui" : n === 1 ? 'depuis hier' : `depuis ${n} j`; };
+  const todo = [...waiting.map(w => ({ ...w, kind: 'waiting' })), ...overdue.map(w => ({ ...w, kind: 'todo' }))];
 
   view.className = 'narrow';
   view.innerHTML = `
-    <div class="topbar"><div><h1>Déplacements</h1><div class="sub">Une note de frais pour chaque étape, jour par jour.</div></div>${topRight()}</div>
-    <button class="btn btn-accent btn-block" data-trip-new style="min-height:52px;margin-bottom:18px">Nouveau déplacement</button>
+    <div class="topbar"><div><h1>Déplacements</h1></div>${topRight()}</div>
+    <button class="new-trip" data-trip-new><span class="cat-ico">＋</span><span><b>Nouveau déplacement</b><small>Les étapes habituelles sont ajoutées pour vous</small></span></button>
 
-    ${waiting.length ? `<div class="section-title"><h2>Pense-bête : factures attendues</h2></div>
-    <div class="list">${waiting.map(w => `<div class="row" data-goto="${w.trip.id}">
-      <span class="cat-ico">⏳</span>
-      <span style="min-width:0"><div class="t">${esc(w.step.label)}${w.day ? ' · ' + dateLabel(w.day) : ''}</div><div class="s">${esc(label(w.trip))} · demandée ${since(w.step.waiting_since || w.day || w.trip.end)}</div></span>
-      <span class="r"><span class="pill waiting">Attendue</span></span></div>`).join('')}</div>` : ''}
-
-    ${overdue.length ? `<div class="section-title"><h2>Étapes passées sans justificatif</h2></div>
-    <div class="list">${overdue.slice(0, 8).map(w => `<div class="row" data-goto="${w.trip.id}">
-      <span class="cat-ico">${(CAT[w.step.cat] || CAT.autre).ico}</span>
-      <span style="min-width:0"><div class="t">${esc(w.step.label)}${w.day ? ' · ' + dateLabel(w.day) : ''}</div><div class="s">${esc(label(w.trip))}</div></span>
-      <span class="r"><span class="pill incomplete">À justifier</span></span></div>`).join('')}</div>` : ''}
+    ${todo.length ? `<div class="section-title"><h2>À faire</h2><span class="muted">${todo.length}</span></div>
+    <div class="list">${todo.slice(0, 10).map(w => `<div class="row" data-goto="${w.trip.id}">
+      <span class="cat-ico">${w.kind === 'waiting' ? '⏳' : (CAT[w.step.cat] || CAT.autre).ico}</span>
+      <span style="min-width:0"><div class="t">${esc(w.step.label)}${w.day ? ' · ' + shortDate(w.day) : ''}</div><div class="s">${esc(label(w.trip))}${w.kind === 'waiting' ? ' · facture attendue ' + since(w.step.waiting_since || w.day || w.trip.end) : ''}</div></span>
+      <span class="r">${w.kind === 'waiting' ? '<span class="pill waiting">Attendue</span>' : '<span class="pill incomplete">À justifier</span>'}</span></div>`).join('')}</div>` : ''}
 
     <div class="section-title"><h2>Mes déplacements</h2></div>
     ${trips.length ? `<div class="list">${trips.map(t => {
@@ -1114,14 +1196,11 @@ async function viewTrips() {
       const ok = st.done + st.none;
       const state = t.end < today ? (st.todo || st.waiting ? 'À finir' : 'Complet') : t.start > today ? 'À venir' : 'En cours';
       return `<div class="row trip-row" data-goto="${t.id}">
-        <span class="cat-ico">🧳</span>
-        <span style="min-width:0"><div class="t">${esc(label(t))}</div><div class="s">${dateLabel(t.start)}${t.end !== t.start ? ' → ' + dateLabel(t.end) : ''} · ${ok}/${st.steps} étapes</div>
-          <div class="progress mini" aria-hidden="true"><i class="p1" style="width:${st.steps ? (st.done / st.steps) * 100 : 0}%"></i><i class="p3" style="width:${st.steps ? (st.none / st.steps) * 100 : 0}%"></i><i class="p4" style="width:${st.steps ? (st.waiting / st.steps) * 100 : 0}%"></i></div></span>
-        <span class="r"><div class="amount">${eur.format(st.amount)}</div><span class="pill ${state === 'Complet' ? 'remboursee' : state === 'À finir' ? 'incomplete' : 'declaree'}">${state}</span></span>
+        <span class="cat-ico">${state === 'Complet' ? '✅' : '🧳'}</span>
+        <span style="min-width:0"><div class="t">${esc(label(t))}</div><div class="s">${shortDate(t.start)}${t.end !== t.start ? ' → ' + shortDate(t.end) : ''} · ${ok}/${st.steps} étapes · ${eur.format(st.amount)}</div></span>
+        <span class="r"><span class="pill ${state === 'Complet' ? 'remboursee' : state === 'À finir' ? 'incomplete' : 'declaree'}">${state}</span></span>
       </div>`;
-    }).join('')}</div>` : `<div class="list empty"><b>Aucun déplacement</b>Créez votre prochain déplacement : les étapes habituelles (transport, repas, hôtel, parking) sont ajoutées pour vous, il ne reste qu'à y attacher les tickets.</div>`}
-
-    <a class="card link-card" href="#/planning"><b>Rappels Outlook et jours oubliés</b><span class="muted">Rappel toutes les 2 semaines, comparaison avec votre planning Outlook</span></a>`;
+    }).join('')}</div>` : `<div class="list empty"><b>Aucun déplacement</b>Créez votre prochain déplacement : il ne restera qu'à attacher un ticket à chaque étape.</div>`}`;
 
   $('[data-trip-new]').onclick = () => { location.hash = '#/deplacement/new'; };
   $$('[data-goto]').forEach(r => r.onclick = () => { location.hash = `#/deplacement/${r.dataset.goto}`; });
@@ -1219,12 +1298,12 @@ async function viewTrip(id) {
     const r = stepState(s, expMap);
     const c = CAT[s.cat] || CAT.autre;
     const e = r.linked[0];
-    const sub = r.s === 'done' ? `${esc(e.place || c.label)}${r.linked.length > 1 ? ` + ${r.linked.length - 1} autre${r.linked.length > 2 ? 's' : ''}` : ''}`
+    const sub = r.s === 'done' ? `${esc(rowName(e))}${r.linked.length > 1 ? ` + ${r.linked.length - 1} autre${r.linked.length > 2 ? 's' : ''}` : ''}`
       : r.s === 'waiting' ? 'Facture pas encore reçue' : r.s === 'none' ? 'Pas de frais' : 'Ajouter le ticket';
-    const right = r.s === 'done' ? `<div class="amount${isNP(e) ? ' np-amt' : ''}">${eur.format(r.linked.reduce((a, x) => a + (x.amount || 0), 0))}</div>${pillHtml(e)}`
+    const right = r.s === 'done' ? `<span class="step-ok"><span class="amount${isNP(e) ? ' np-amt' : ''}">${eur.format(r.linked.reduce((a, x) => a + (x.amount || 0), 0))}</span><i class="check" aria-label="Justifiée">✓</i></span>`
       : r.s === 'waiting' ? '<span class="pill waiting">Attendue</span>' : r.s === 'none' ? '<span class="pill none">Pas de frais</span>' : '<span class="pill incomplete">À justifier</span>';
     return `<div class="row step ${r.s}" data-step="${s.id}" data-day="${d || ''}">
-      ${e ? thumbHtml(e, thumbs[e.id]) : `<span class="cat-ico">${r.s === 'waiting' ? '⏳' : c.ico}</span>`}
+      <span class="cat-ico">${r.s === 'waiting' ? '⏳' : c.ico}</span>
       <span style="min-width:0"><div class="t">${esc(s.label)}</div><div class="s">${sub}</div></span>
       <span class="r">${right}</span></div>`;
   };
@@ -1245,14 +1324,12 @@ async function viewTrip(id) {
         <div>À justifier<b class="num">${st.todo}</b></div>
       </div>
     </div>
-    ${loose.length ? `<div class="np-note loose"><b>${loose.length} note${loose.length > 1 ? 's' : ''} de ces dates ne ${loose.length > 1 ? 'sont' : 'est'} rattachée${loose.length > 1 ? 's' : ''} à aucune étape.</b>
-      <div class="btn-row" style="margin-top:8px"><button class="btn btn-small" data-autolink>Rattacher automatiquement</button></div></div>` : ''}
     ${tripDates(t).map(d => `<section class="day"><div class="day-head"><h2>${longDay(d)}</h2></div>
       <div class="list">${(t.days[d] || []).map(s => stepRow(s, d)).join('')}${addRow(d)}</div></section>`).join('')}
     <section class="day"><div class="day-head"><h2>Frais du déplacement</h2><span class="muted">parking, péage, carburant…</span></div>
       <div class="list">${(t.general || []).map(s => stepRow(s, null)).join('')}${addRow(null)}</div></section>
-    ${loose.length ? `<section class="day"><div class="day-head"><h2>Notes à rattacher</h2></div>
-      <div class="list">${loose.map(e => `<div class="row" data-loose="${e.id}">${thumbHtml(e, thumbs[e.id])}<span style="min-width:0"><div class="t">${esc(e.place || (CAT[e.category] || CAT.autre).label)}</div><div class="s">${dateLabel(e.date)}</div></span><span class="r"><div class="amount">${e.amount > 0 ? eur.format(e.amount) : '— €'}</div><span class="pill declaree">Rattacher</span></span></div>`).join('')}</div></section>` : ''}`;
+    ${loose.length ? `<section class="day"><div class="day-head"><h2>Notes à rattacher</h2><button class="linkish" data-autolink>Tout rattacher</button></div>
+      <div class="list">${loose.map(e => `<div class="row" data-loose="${e.id}">${thumbHtml(e, thumbs[e.id])}<span style="min-width:0"><div class="t">${esc(rowTitle(e))}</div><div class="s">${esc(rowName(e))}</div></span><span class="r"><div class="amount">${e.amount > 0 ? eur.format(e.amount) : '— €'}</div><span class="pill declaree">Rattacher</span></span></div>`).join('')}</div></section>` : ''}`;
 
   $('[data-back]').onclick = () => { location.hash = '#/deplacements'; };
   $('[data-edit]').onclick = () => { location.hash = `#/deplacement/${t.id}/modifier`; };
@@ -1366,7 +1443,7 @@ async function confirmSheet({ title, text, ok = 'Supprimer', danger = true }) {
   });
 }
 
-const noteTitle = e => `${e.place || (CAT[e.category] || CAT.autre).label} · ${e.amount > 0 ? eur.format(e.amount) : '— €'} · ${dateLabel(e.date)}`;
+const noteTitle = e => `${rowTitle(e)} · ${rowName(e)} · ${e.amount > 0 ? eur.format(e.amount) : '— €'}`;
 
 async function deleteExpense(e, { ask = true } = {}) {
   if (ask && !(await confirmSheet({ title: 'Supprimer cette note ?', text: `<b>${esc(noteTitle(e))}</b><br>Elle ira dans l'historique des suppressions : vous pourrez la restaurer avec ses photos.` }))) return false;
@@ -1410,7 +1487,7 @@ async function viewHistory() {
     <p class="muted" style="margin:6px 0 16px">Les notes et déplacements supprimés restent ici, avec leurs photos, jusqu'à ce que vous les supprimiez définitivement.</p>
     ${items.length ? `<div class="list">${items.map(i => i.kind === 'note' ? `<div class="row hist" data-note="${i.e.id}">
         ${thumbHtml(i.e, thumbs[i.e.id])}
-        <span style="min-width:0"><div class="t">${esc(i.e.place || (CAT[i.e.category] || CAT.autre).label)}</div><div class="s">Ticket du ${dateLabel(i.e.date)} · supprimée ${when(i.at)}</div></span>
+        <span style="min-width:0"><div class="t">${esc(rowTitle(i.e))}</div><div class="s">${esc(rowName(i.e))} · supprimée ${when(i.at)}</div></span>
         <span class="r"><div class="amount">${i.e.amount > 0 ? eur.format(i.e.amount) : '— €'}</div></span>
         <div class="hist-actions"><button class="btn btn-small" data-restore="${i.e.id}">Restaurer</button><button class="btn btn-small btn-danger" data-purge="${i.e.id}">Supprimer définitivement</button></div>
       </div>` : `<div class="row hist">
@@ -1519,7 +1596,7 @@ async function render() {
   let route = parts[0] || 'deplacements';
   if (route === 'accueil' || route === 'tableau') route = 'mois';           // anciens liens
   if (route === 'planning') route = 'reglages';
-  const tab = { deplacement: 'deplacements', note: '', historique: 'reglages' }[route] ?? route;
+  const tab = { deplacement: 'deplacements', note: '', historique: 'reglages', relecture: 'mois' }[route] ?? route;
   $$('[data-tab]').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
   if (route === 'note') {
     await viewForm(parts[1] === 'new' ? null : parts[1], { date: params.get('date'), place: params.get('place'), cat: params.get('cat'), note: params.get('note'), trip: params.get('trip'), step: params.get('step') });
@@ -1530,6 +1607,7 @@ async function render() {
   } else if (route === 'mois') await viewMonth(params);
   else if (route === 'reglages') await viewSettings();
   else if (route === 'historique') await viewHistory();
+  else if (route === 'relecture') await viewReview(params);
   else await viewTrips();
   view.scrollTop = 0; window.scrollTo(0, 0);
   // barre de titre compacte façon iPhone, visible quand le grand titre sort de l'écran

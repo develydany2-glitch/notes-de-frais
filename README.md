@@ -144,6 +144,17 @@ L'app n'a plus que deux onglets, avec le bouton **+** au centre. Les Réglages s
 * Correctif : la page est désormais toujours servie avec les styles de sa propre version. Cela évite les icônes décalées à gauche après une mise à jour.
 
 
+## Version 1.8 : onglets épurés et relecture
+
+* **Déplacements** sert à vérifier que chaque étape a son justificatif (coche ✓ et montant). **Mois** sert au suivi du remboursement : statuts, glissement des lignes, totaux. Les rappels des déplacements ne s'affichent plus dans Mois.
+* **Mois** : touchez le titre (ex. « Novembre 2026 ⌄ ») pour choisir un mois, ou utilisez les flèches ‹ ›. Un seul résumé (total du mois, remboursé, déclaré, à déclarer) et une liste « À traiter » courte.
+* **Lignes** : la catégorie et la date en titre (« Métro · 03/11 »), le nom du ticket en dessous (« Ticket métro »).
+* **Relecture** : avant chaque enregistrement, un récapitulatif montant, nom, date et type s'affiche à côté de la photo. Les tickets importés sont marqués « À vérifier » ; l'écran Relecture permet de les valider un par un.
+* **Appui long** sur une ligne : changer de mois ou supprimer.
+
+**Supabase** : le texte de mise à jour proposé dans Réglages ajoute la colonne `verified` (relecture).
+
+
 ### Contenu du dossier
 
 | Fichier | Rôle |
