@@ -46,9 +46,10 @@ export const DB = {
   },
   getExpense(id) { return tx('expenses', 'readonly', s => reqP(s.get(id))); },
   putExpense(e) { return tx('expenses', 'readwrite', s => reqP(s.put(e))); },
-  async allTrips({ includeDeleted = false } = {}) {
+  // includeConfig : inclut les enregistrements de réglages (ex. mois clôturés), utile pour la synchro
+  async allTrips({ includeDeleted = false, includeConfig = false } = {}) {
     const all = await tx('trips', 'readonly', s => reqP(s.getAll()));
-    return (all || []).filter(t => includeDeleted || !t.deleted);
+    return (all || []).filter(t => (includeDeleted || !t.deleted) && (includeConfig || !t.kind));
   },
   getTrip(id) { return tx('trips', 'readonly', s => reqP(s.get(id))); },
   putTrip(t) { return tx('trips', 'readwrite', s => reqP(s.put(t))); },

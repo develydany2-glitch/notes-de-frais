@@ -214,7 +214,7 @@ export async function fetchPhoto(p) {
 function tripsTableMissing(err) { return /PGRST205|PGRST204|42P01|trips/.test(err.message); }
 
 async function pushTrips(cfg) {
-  const dirty = (await DB.allTrips({ includeDeleted: true })).filter(t => t.dirty);
+  const dirty = (await DB.allTrips({ includeDeleted: true, includeConfig: true })).filter(t => t.dirty);
   let n = 0;
   for (const t of dirty) {
     const { dirty: _d, ...data } = t;

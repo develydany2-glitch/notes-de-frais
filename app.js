@@ -477,7 +477,7 @@ async function viewForm(id, prefill = {}) {
       else if (isNew) linked = await autoLinkDate(e.date);
       toast(leftNP ? 'Facture ajoutée : la note passe « À déclarer »' : isNP(e) ? 'Paiement gardé à part (non pris en compte)' : isNew ? (e.has_photo ? 'Note enregistrée' : 'Note enregistrée sans photo') : 'Modifications enregistrées');
       if (linked) setTimeout(() => toast('Note rattachée à votre déplacement'), 2700);
-      if (prefill.trip) location.hash = `#/deplacement/${prefill.trip}`;
+      if (prefill.trip) location.hash = prefill.trip.startsWith('day-') ? `#/planning?v=jour&d=${prefill.trip.slice(4)}` : '#/planning';
       else if (history.length > 1 && !isNew) history.back();
       else location.hash = `#/mois?m=${mOf(e)}`;
     };
@@ -643,14 +643,16 @@ const shortDate = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) : '';
 const rowTitle = e => `${e.category ? (CAT[e.category] || CAT.autre).label : 'Ticket'} · ${shortDate(e.date)}`;
 const rowName = e => e.place || 'Nom à compléter';
 
-function openMonthsSheet(all, current) {
-  const months = [...new Set([...all.map(mOf), monthKey(todayKey())])].sort().reverse();
+async function openMonthsSheet(all, current) {
+  const closed = await closedMonths();
+  const months = [...new Set([...all.map(mOf), monthKey(todayKey())])].filter(mk => !closed[mk]).sort().reverse();
   const d = $('#sheet');
-  menuSheet('Choisir un mois', months.map(mk => {
+  const nArch = Object.keys(closed).length;
+  menuSheet('Choisir un mois', [...(nArch ? [{ ico: '📁', label: `Archives · ${nArch} mois clôturé${nArch > 1 ? 's' : ''}`, sub: 'Mois terminés (FIN)', fn: () => { d.close(); location.hash = '#/archives'; } }] : []), ...months.map(mk => {
     const x = sums(all.filter(e => mOf(e) === mk));
     const left = x.total - x.remboursee;
     return { ico: mk === current ? '✓' : '', label: monthName(mk), sub: x.total ? (left < 0.005 ? `Tout remboursé · ${eur.format(x.total)}` : `${eur.format(left)} en attente sur ${eur.format(x.total)}`) : 'Aucune note', fn: () => { d.close(); location.hash = `#/mois?m=${mk}`; } };
-  }));
+  })]);
 }
 
 async function viewMonth(params) {
@@ -659,6 +661,8 @@ async function viewMonth(params) {
   const filter = params.get('f') || 'tout';
   const dups = duplicateIds(all);
   const inMonth = all.filter(e => mOf(e) === m);
+  const closed = await closedMonths();
+  const isClosed = !!closed[m];
   const FILTERS = [['tout', 'Tout'], ...STATUS_ORDER.map(s => [s, STATUS[s]]), [NP, 'Non pris en compte']];
   const list = (filter === 'tout' ? inMonth : filter === 'incomplete' ? inMonth.filter(isIncomplete) : filter === NP ? inMonth.filter(isNP)
     : filter === 'doublons' ? inMonth.filter(e => dups.has(e.id)) : filter === 'verifier' ? inMonth.filter(e => e.verified === false)
@@ -702,8 +706,9 @@ async function viewMonth(params) {
   view.innerHTML = `
     <div class="topbar month-top">
       <button class="month-title" data-months aria-label="Choisir un mois"><h1>${monthName(m)}</h1><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
-      ${topRight()}
+      <div class="top-right"><a class="gear" href="#/archives" aria-label="Archives des mois clôturés"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></a>${topRight().replace('<div class="top-right">', '').replace(/<\/div>$/, '')}</div>
     </div>
+    ${isClosed ? `<div class="closed-banner"><span>📁 Mois clôturé (FIN) le ${new Date(closed[m]).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' })} · rangé dans les archives</span><span class="btn-row"><button class="linkish" data-export>Exporter</button><button class="linkish" data-reopen>Rouvrir</button></span></div>` : ''}
     <div class="month-grid">
       <div class="mg-a">
         <div class="ticket compact month-card">
@@ -717,9 +722,10 @@ async function viewMonth(params) {
           </div>
           <div class="mc-foot">
             <span>Reste à rembourser, tous mois : <b class="num">${eur.format(pendingSum)}</b></span>
-            ${bulkable.some(e => e.status !== 'remboursee') ? '<button class="linkish" data-bulkmenu>Tout marquer…</button>' : ''}
+            ${!isClosed && bulkable.some(e => e.status !== 'remboursee') ? '<button class="linkish" data-bulkmenu>Tout marquer…</button>' : ''}
           </div>
           ${s.npCount ? `<a class="np-line" href="#/mois?m=${m}&f=${NP}"><span>⏸️ Non pris en compte, sans facture</span><b class="num">${eur.format(s.np)}</b></a>` : ''}
+          ${!isClosed && inMonth.length ? '<button class="btn btn-block close-month" data-close-month>Clôturer le mois (FIN)</button>' : ''}
         </div>
         ${todo.length ? `<div class="section-title"><h2>À traiter</h2></div><div class="list todo-list">${todo.map(t => `<a class="row" href="${t.href}"><span class="cat-ico">${t.ico}</span><span style="min-width:0"><div class="t">${t.label}</div><div class="s">${t.sub}</div></span><span class="r"></span></a>`).join('')}</div>` : ''}
       </div>
@@ -737,10 +743,14 @@ async function viewMonth(params) {
   const on = $('#flt [aria-pressed="true"]'); if (on) on.scrollIntoView({ inline: 'center', block: 'nearest' });
   $('[data-months]').onclick = () => openMonthsSheet(all, m);
   bindRows(all);
-  bindSwipes(all);
+  if (!isClosed) bindSwipes(all);
+  const cm = $('[data-close-month]'); if (cm) cm.onclick = () => closeMonth(m, inMonth);
+  const ro = $('[data-reopen]'); if (ro) ro.onclick = async () => { if (await confirmSheet({ title: `Rouvrir ${monthLabel(m)} ?`, text: 'Le mois sort des archives et redevient modifiable.', ok: 'Rouvrir', danger: false })) { await setClosed(m, false); toast(`${monthName(m)} rouvert`); render(); } };
+  const ex = $('[data-export]'); if (ex) ex.onclick = () => exportCSV(m);
   const hint = $('#sw-hint-ok'); if (hint) hint.onclick = () => { try { localStorage.setItem('swipeHint', '1'); } catch (_) {} $('#sw-hint').remove(); };
   $$('[data-cycle]').forEach(b => b.onclick = async ev => {
     ev.stopPropagation();
+    if (isClosed) { toast('Mois clôturé : rouvrez-le pour changer un statut.'); return; }
     const e = all.find(x => x.id === b.dataset.cycle);
     await swipeAdvance(e);
   });
@@ -1002,7 +1012,7 @@ async function viewSettings() {
       <h3 style="margin-top:8px">Sur le PC</h3>
       <p class="muted" style="margin-top:4px">Ouvrez la même adresse dans Edge ou Chrome, puis menu ⋯ › Applications › Installer cette application.</p>
     </div>
-    <p class="muted" style="text-align:center;margin-top:18px">Version 1.8 · <button class="linkish" id="upd" style="font-size:14px">Rechercher une mise à jour</button></p>`;
+    <p class="muted" style="text-align:center;margin-top:18px">Version 1.9 · <button class="linkish" id="upd" style="font-size:14px">Rechercher une mise à jour</button></p>`;
 
   const lg = $('#login');
   if (lg) lg.onclick = async () => {
@@ -1011,7 +1021,7 @@ async function viewSettings() {
       await Sync.login($('#s-url').value, $('#s-key').value, $('#s-email').value, $('#s-pass').value);
       // toutes les notes locales sont à envoyer
       for (const e of await DB.allExpenses({ includeDeleted: true })) { e.photos = photosOf(e).map(p => ({ id: p.id, path: null })); e.dirty = true; e.photo_dirty = e.photos.length > 0; await DB.putExpense(e); }
-      for (const t of await DB.allTrips({ includeDeleted: true })) { t.dirty = true; await DB.putTrip(t); }
+      for (const t of await DB.allTrips({ includeDeleted: true, includeConfig: true })) { t.dirty = true; await DB.putTrip(t); }
       toast('Connecté. Synchronisation en cours…');
       await Sync.syncNow();
       render();
@@ -1168,100 +1178,267 @@ async function linkedExpenseIds() {
   return ids;
 }
 
-// ---------- Liste des déplacements ----------
-async function viewTrips() {
-  const trips = (await DB.allTrips()).sort((a, b) => b.start.localeCompare(a.start));
-  const exps = await DB.allExpenses();
-  const expMap = Object.fromEntries(exps.map(e => [e.id, e]));
-  const { waiting, overdue } = await tripReminders();
-  const today = todayKey();
-  const label = t => t.title || `Déplacement du ${dateLabel(t.start)}`;
-  const since = d => { const n = daysBetween(new Date(d + 'T12:00'), new Date()); return n <= 0 ? "aujourd'hui" : n === 1 ? 'depuis hier' : `depuis ${n} j`; };
-  const todo = [...waiting.map(w => ({ ...w, kind: 'waiting' })), ...overdue.map(w => ({ ...w, kind: 'todo' }))];
+// ---------- Planning 2026–2027 : jours « en déplacement » ----------
+// Chaque jour marqué est un enregistrement « day-AAAA-MM-JJ » (même stockage et même synchro que les anciens déplacements)
+const PLAN_MIN = '2026-01', PLAN_MAX = '2027-12';
+const dayId = d => `day-${d}`;
+let planSelecting = false;
+const planSel = new Set();
 
-  view.className = 'narrow';
-  view.innerHTML = `
-    <div class="topbar"><div><h1>Déplacements</h1></div>${topRight()}</div>
-    <button class="new-trip" data-trip-new><span class="cat-ico">＋</span><span><b>Nouveau déplacement</b><small>Les étapes habituelles sont ajoutées pour vous</small></span></button>
+function easterDate(y) {
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  return new Date(y, Math.floor((h + l - 7 * m + 114) / 31) - 1, ((h + l - 7 * m + 114) % 31) + 1);
+}
+const _hol = {};
+function holidays(y) {
+  if (_hol[y]) return _hol[y];
+  const E = easterDate(y);
+  const add = n => { const x = new Date(E); x.setDate(x.getDate() + n); return dayKey(x); };
+  return (_hol[y] = { [`${y}-01-01`]: "Jour de l'an", [add(1)]: 'Lundi de Pâques', [`${y}-05-01`]: 'Fête du travail', [`${y}-05-08`]: 'Victoire 1945', [add(39)]: 'Ascension', [add(50)]: 'Lundi de Pentecôte', [`${y}-07-14`]: 'Fête nationale', [`${y}-08-15`]: 'Assomption', [`${y}-11-01`]: 'Toussaint', [`${y}-11-11`]: 'Armistice', [`${y}-12-25`]: 'Noël' });
+}
+const holidayOf = d => holidays(+d.slice(0, 4))[d] || null;
+const addDays = (d, n) => { const x = new Date(d + 'T12:00'); x.setDate(x.getDate() + n); return dayKey(x); };
+const mondayOf = d => { const x = new Date(d + 'T12:00'); const w = (x.getDay() + 6) % 7; x.setDate(x.getDate() - w); return dayKey(x); };
+const clampDay = d => d < PLAN_MIN + '-01' ? PLAN_MIN + '-01' : d > PLAN_MAX + '-31' ? PLAN_MAX + '-31' : d;
 
-    ${todo.length ? `<div class="section-title"><h2>À faire</h2><span class="muted">${todo.length}</span></div>
-    <div class="list">${todo.slice(0, 10).map(w => `<div class="row" data-goto="${w.trip.id}">
-      <span class="cat-ico">${w.kind === 'waiting' ? '⏳' : (CAT[w.step.cat] || CAT.autre).ico}</span>
-      <span style="min-width:0"><div class="t">${esc(w.step.label)}${w.day ? ' · ' + shortDate(w.day) : ''}</div><div class="s">${esc(label(w.trip))}${w.kind === 'waiting' ? ' · facture attendue ' + since(w.step.waiting_since || w.day || w.trip.end) : ''}</div></span>
-      <span class="r">${w.kind === 'waiting' ? '<span class="pill waiting">Attendue</span>' : '<span class="pill incomplete">À justifier</span>'}</span></div>`).join('')}</div>` : ''}
-
-    <div class="section-title"><h2>Mes déplacements</h2></div>
-    ${trips.length ? `<div class="list">${trips.map(t => {
-      const st = tripStats(t, expMap);
-      const ok = st.done + st.none;
-      const state = t.end < today ? (st.todo || st.waiting ? 'À finir' : 'Complet') : t.start > today ? 'À venir' : 'En cours';
-      return `<div class="row trip-row" data-goto="${t.id}">
-        <span class="cat-ico">${state === 'Complet' ? '✅' : '🧳'}</span>
-        <span style="min-width:0"><div class="t">${esc(label(t))}</div><div class="s">${shortDate(t.start)}${t.end !== t.start ? ' → ' + shortDate(t.end) : ''} · ${ok}/${st.steps} étapes · ${eur.format(st.amount)}</div></span>
-        <span class="r"><span class="pill ${state === 'Complet' ? 'remboursee' : state === 'À finir' ? 'incomplete' : 'declaree'}">${state}</span></span>
-      </div>`;
-    }).join('')}</div>` : `<div class="list empty"><b>Aucun déplacement</b>Créez votre prochain déplacement : il ne restera qu'à attacher un ticket à chaque étape.</div>`}`;
-
-  $('[data-trip-new]').onclick = () => { location.hash = '#/deplacement/new'; };
-  $$('[data-goto]').forEach(r => r.onclick = () => { location.hash = `#/deplacement/${r.dataset.goto}`; });
+// Anciens déplacements nommés -> un enregistrement par jour (étapes et notes rattachées conservées)
+async function migrateTripsToDays() {
+  for (const t of await DB.allTrips()) {
+    if (t.id.startsWith('day-')) continue;
+    const dates = tripDates(t);
+    for (const [i, d] of dates.entries()) {
+      const rec = (await DB.getTrip(dayId(d))) || { id: dayId(d), start: d, end: d, days: { [d]: [] }, general: [], created_at: new Date().toISOString(), deleted: false };
+      rec.deleted = false;
+      rec.days[d] = [...(rec.days[d] || []), ...((t.days || {})[d] || [])];
+      if (i === 0) rec.days[d].push(...(t.general || []));
+      await saveTrip(rec);
+    }
+    t.deleted = true; t.purged = true; t.days = {}; t.general = [];
+    await saveTrip(t);
+  }
 }
 
-// ---------- Création / modification ----------
-async function viewTripForm(id) {
-  const t = id ? await DB.getTrip(id) : null;
-  const start = t ? t.start : todayKey();
+async function dayRecords() {
+  const map = {};
+  for (const t of await DB.allTrips()) if (t.id.startsWith('day-') && !t.deleted) map[t.start] = t;
+  return map;
+}
+
+function dayInfo(d, rec, expMap, byDate) {
+  const tickets = byDate[d] || [];
+  if (!rec) return { cls: tickets.length ? 'tickets' : '', tickets };
+  let todo = 0, waiting = 0, done = 0, none = 0, n = 0, amount = 0;
+  eachStep(rec, s => { const r = stepState(s, expMap); n++; if (r.s === 'done') done++; else if (r.s === 'todo') todo++; else if (r.s === 'waiting') waiting++; else none++; r.linked.forEach(e => { if (!isNP(e)) amount += e.amount || 0; }); });
+  const future = d > todayKey();
+  const missing = n ? todo : (tickets.length ? 0 : 1);
+  const cls = waiting ? 'wait' : missing ? (future ? 'plan' : 'miss') : 'ok';
+  return { cls, todo, waiting, done, none, n, amount, tickets, rec };
+}
+
+async function markDays(dates, mode) {
+  const sorted = [...dates].sort();
+  // jours consécutifs = un même déplacement : aller le premier jour, retour le dernier
+  const runs = [];
+  sorted.forEach(d => { const last = runs[runs.length - 1]; if (last && addDays(last[last.length - 1], 1) === d) last.push(d); else runs.push([d]); });
+  let n = 0;
+  for (const run of runs) for (const [i, d] of run.entries()) {
+    const existing = await DB.getTrip(dayId(d));
+    if (existing && !existing.deleted) continue;
+    const steps = mode === 'aucune' ? [] : templateDay(i, run.length, mode);
+    if (mode !== 'aucune' && i === 0) steps.push(newStep('Parking', 'parking', { label: mode === 'train' ? 'Parking gare' : mode === 'avion' ? 'Parking aéroport' : 'Parking' }));
+    const rec = existing || { id: dayId(d), start: d, end: d, created_at: new Date().toISOString() };
+    Object.assign(rec, { days: { [d]: steps }, general: [], deleted: false, deleted_at: null });
+    await saveTrip(rec);
+    await autoLink(rec.id);
+    n++;
+  }
+  await DB.setMeta('tripMode', mode);
+  return n;
+}
+
+async function unmarkDays(dates) {
+  for (const d of dates) {
+    const rec = await DB.getTrip(dayId(d));
+    if (rec && !rec.deleted) { rec.deleted = true; rec.deleted_at = new Date().toISOString(); rec.title = `Déplacement du ${dateLabel(d)}`; await saveTrip(rec); }
+  }
+}
+
+async function askMarkDays(dates) {
+  const last = await DB.getMeta('tripMode', 'train');
+  const d = $('#sheet');
+  const go = async mode => { d.close(); const n = await markDays(dates, mode); planSel.clear(); planSelecting = false; toast(n ? `${n} jour${n > 1 ? 's' : ''} en déplacement` : 'Ces jours étaient déjà en déplacement'); render(); };
+  const label = dates.length === 1 ? longDay(dates[0]) : `${dates.length} jours`;
+  menuSheet(`Marquer en déplacement · ${label}`, [
+    { ico: '🚆', label: 'En train' + (last === 'train' ? ' · habituel' : ''), sub: 'Train aller/retour, métro, repas, hôtel, parking gare', fn: () => go('train') },
+    { ico: '🚗', label: 'En voiture' + (last === 'voiture' ? ' · habituel' : ''), sub: 'Péage, carburant, repas, hôtel, parking', fn: () => go('voiture') },
+    { ico: '✈️', label: 'En avion' + (last === 'avion' ? ' · habituel' : ''), sub: 'Avion aller/retour, métro, repas, hôtel, parking', fn: () => go('avion') },
+    { ico: '○', label: 'Sans étapes', sub: 'Le jour est seulement marqué', fn: () => go('aucune') }
+  ]);
+}
+
+async function askUnmarkDays(dates) {
+  if (!(await confirmSheet({ title: dates.length > 1 ? `Retirer ${dates.length} jours du planning ?` : 'Retirer ce jour du planning ?', text: `${dates.length > 1 ? 'Ces jours ne seront plus' : 'Ce jour ne sera plus'} en déplacement. Les notes de frais restent dans vos mois, et vous pourrez restaurer depuis l'historique des suppressions.` }))) return false;
+  await unmarkDays(dates);
+  planSel.clear(); planSelecting = false;
+  toast(dates.length > 1 ? 'Jours retirés du planning' : 'Jour retiré du planning', { label: 'Annuler', fn: async () => { for (const d of dates) { const r = await DB.getTrip(dayId(d)); if (r) { r.deleted = false; r.deleted_at = null; await saveTrip(r); } } render(); } });
+  render();
+  return true;
+}
+
+async function viewPlanning(params) {
+  const v = params.get('v') || (await DB.getMeta('planView', 'mois'));
+  await DB.setMeta('planView', v);
+  const anchor = clampDay(params.get('d') || todayKey());
+  if (v === 'jour') return viewDay(anchor);
+  const workweek = (await DB.getMeta('planWeek', 'travail')) === 'travail';
+  const exps = await DB.allExpenses();
+  const expMap = Object.fromEntries(exps.map(e => [e.id, e]));
+  const byDate = {}; exps.forEach(e => { (byDate[e.date] = byDate[e.date] || []).push(e); });
+  const recs = await dayRecords();
+  const today = todayKey();
+  const { waiting, overdue } = await tripReminders();
+  const mk = anchor.slice(0, 7);
+
+  let body = '', title = '', prev = '', next = '';
+  if (v === 'mois') {
+    title = monthName(mk);
+    prev = shiftMonth(mk, -1) >= PLAN_MIN ? shiftMonth(mk, -1) + '-01' : ''; next = shiftMonth(mk, 1) <= PLAN_MAX ? shiftMonth(mk, 1) + '-01' : '';
+    const first = mk + '-01';
+    const start = mondayOf(first);
+    const cells = [];
+    for (let d = start; cells.length < 42; d = addDays(d, 1)) {
+      if (cells.length >= 35 && d.slice(0, 7) !== mk) break;
+      cells.push(d);
+    }
+    body = `<div class="cal">
+      ${['L', 'M', 'M', 'J', 'V', 'S', 'D'].map(x => `<div class="cal-h">${x}</div>`).join('')}
+      ${cells.map(d => {
+        const out = d.slice(0, 7) !== mk;
+        const info = dayInfo(d, recs[d], expMap, byDate);
+        const wd = new Date(d + 'T12:00').getDay();
+        const hol = holidayOf(d);
+        const mark = info.cls === 'ok' ? '✓' : info.cls === 'wait' ? '⏳' : info.cls === 'miss' ? `${info.todo || '!'}` : '';
+        return `<button class="cal-d ${out ? 'out' : ''} ${info.cls} ${wd === 0 || wd === 6 ? 'we' : ''} ${hol ? 'hol' : ''} ${d === today ? 'today' : ''} ${planSel.has(d) ? 'sel' : ''}" data-day="${d}" ${out ? 'tabindex="-1"' : ''} aria-label="${longDay(d)}${hol ? ', ' + hol : ''}${recs[d] ? ', en déplacement' : ''}">
+          <span class="n">${+d.slice(8)}</span>${mark ? `<span class="mk">${mark}</span>` : info.cls === 'tickets' ? '<span class="dot"></span>' : hol ? '<span class="holi">férié</span>' : ''}</button>`;
+      }).join('')}
+    </div>
+    <div class="cal-legend"><span><i class="lg ok"></i>Tout justifié</span><span><i class="lg miss"></i>À justifier</span><span>⏳ Facture attendue</span><span><i class="lg plan"></i>Prévu</span><span><i class="lg-dot"></i>Ticket hors déplacement</span></div>`;
+  } else {
+    const mon = mondayOf(anchor);
+    const days = [...Array(workweek ? 5 : 7)].map((_, i) => addDays(mon, i));
+    title = `Semaine du ${dateLabel(mon)}`;
+    prev = addDays(mon, -7) >= PLAN_MIN + '-01' ? addDays(mon, -7) : ''; next = addDays(mon, 7) <= PLAN_MAX + '-31' ? addDays(mon, 7) : '';
+    body = `<div class="filter-chips wk-toggle"><button class="chip" data-wk="travail" aria-pressed="${workweek}">Lun – ven</button><button class="chip" data-wk="complete" aria-pressed="${!workweek}">Semaine complète</button></div>
+    <div class="list week">${days.map(d => {
+      const info = dayInfo(d, recs[d], expMap, byDate);
+      const hol = holidayOf(d);
+      const icons = info.rec ? (() => { const out = []; eachStep(info.rec, s => { const r = stepState(s, expMap); out.push(`<span class="st ${r.s}" title="${esc(s.label)}">${r.s === 'waiting' ? '⏳' : (CAT[s.cat] || CAT.autre).ico}</span>`); }); return out.join(''); })() : '';
+      const w = new Date(d + 'T12:00');
+      return `<div class="row wk-row ${planSel.has(d) ? 'sel' : ''}" data-day="${d}">
+        <span class="wk-date ${d === today ? 'today' : ''}"><small>${w.toLocaleDateString('fr-FR', { weekday: 'short' })}</small><b>${w.getDate()}</b></span>
+        <span style="min-width:0"><div class="t">${info.rec ? (icons || 'En déplacement') : hol ? esc(hol) : '<span class="muted">Pas en déplacement</span>'}</div>
+          <div class="s">${info.rec ? `${info.done}/${info.n} justifiée${info.done > 1 ? 's' : ''}${info.amount ? ' · ' + eur.format(info.amount) : ''}` : info.tickets.length ? `${info.tickets.length} ticket${info.tickets.length > 1 ? 's' : ''}` : hol ? 'Jour férié' : ''}</div></span>
+        <span class="r">${info.cls === 'ok' ? '<i class="check">✓</i>' : info.cls === 'wait' ? '<span class="pill waiting">Attendue</span>' : info.cls === 'miss' ? '<span class="pill incomplete">À justifier</span>' : info.cls === 'plan' ? '<span class="pill declaree">Prévu</span>' : ''}</span>
+      </div>`;
+    }).join('')}</div>`;
+  }
+
+  const todo = [...waiting.map(w => ({ ...w, kind: 'waiting' })), ...overdue.map(w => ({ ...w, kind: 'todo' }))];
+  const selDates = [...planSel].sort();
+  const selMarked = selDates.filter(d => recs[d]);
   view.className = 'narrow';
   view.innerHTML = `
-    <div class="topbar"><button class="back" data-back><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>Retour</button></div>
-    <h1 style="margin-bottom:16px">${t ? 'Modifier le déplacement' : 'Nouveau déplacement'}</h1>
-    <label class="field"><span>Nom du déplacement</span><input id="t-title" value="${esc(t ? t.title : '')}" placeholder="Ex. IDF — vérification lignes de vie client X"></label>
-    <div class="grid2">
-      <label class="field"><span>Premier jour</span><input type="date" id="t-start" value="${start}"></label>
-      <label class="field"><span>Dernier jour</span><input type="date" id="t-end" value="${t ? t.end : start}"></label>
+    <div class="topbar"><div><h1>Planning</h1></div><div class="top-right"><button class="btn btn-small sel-btn" data-select>${planSelecting ? 'Terminé' : 'Sélectionner'}</button>${topRight().replace('<div class="top-right">', '').replace(/<\/div>$/, '')}</div></div>
+    <div class="segmented plan-seg">${[['mois', 'Mois'], ['semaine', 'Semaine'], ['jour', 'Jour']].map(([k, l]) => `<button data-v="${k}" aria-pressed="${v === k}">${l}</button>`).join('')}</div>
+    <div class="plan-nav">
+      <button class="btn" data-go="${prev}" ${prev ? '' : 'disabled'} aria-label="Précédent">‹</button>
+      <h2>${title}</h2>
+      <button class="btn" data-go="${next}" ${next ? '' : 'disabled'} aria-label="Suivant">›</button>
     </div>
-    ${t ? '' : `<div class="field"><span>Transport principal</span><div class="segmented" id="t-mode">${[['train', 'Train'], ['voiture', 'Voiture'], ['avion', 'Avion']].map(([k, l], i) => `<button type="button" data-m="${k}" aria-pressed="${i === 0}">${l}</button>`).join('')}</div></div>
-    <label class="check"><input type="checkbox" id="t-tpl" checked> Ajouter les étapes habituelles (transport, repas, hôtel, parking). Vous pourrez en retirer ou en ajouter.</label>`}
-    <div class="form-actions">
-      ${t ? '<button class="btn btn-danger" data-del>Supprimer</button>' : ''}
-      <button class="btn btn-primary" data-save>${t ? 'Enregistrer' : 'Créer le déplacement'}</button>
-    </div>`;
-  let mode = 'train';
-  $$('#t-mode button').forEach(b => b.onclick = () => { mode = b.dataset.m; $$('#t-mode button').forEach(x => x.setAttribute('aria-pressed', x === b)); });
-  $('#t-start').onchange = () => { if ($('#t-end').value < $('#t-start').value) $('#t-end').value = $('#t-start').value; };
-  $('[data-back]').onclick = () => history.length > 1 ? history.back() : (location.hash = '#/deplacements');
-  $('[data-save]').onclick = async () => {
-    const s = $('#t-start').value, e = $('#t-end').value;
-    if (!s || !e || e < s) { toast('Vérifiez les dates du déplacement.'); return; }
-    if (daysBetween(new Date(s), new Date(e)) > 30) { toast('Un déplacement dure au maximum 31 jours.'); return; }
-    const title = $('#t-title').value.trim();
-    if (t) {
-      t.title = title; t.start = s; t.end = e;
-      const dates = tripDates(t);
-      dates.forEach(d => { t.days[d] = t.days[d] || []; });
-      // les étapes des jours retirés qui ont une note passent dans les frais du déplacement
-      Object.keys(t.days).filter(d => !dates.includes(d)).forEach(d => { t.general.push(...t.days[d].filter(x => (x.expense_ids || []).length)); delete t.days[d]; });
-      await saveTrip(t);
-      location.hash = `#/deplacement/${t.id}`;
-      return;
-    }
-    const trip = { id: uid(), title, start: s, end: e, days: {}, general: [], created_at: new Date().toISOString(), deleted: false };
-    const dates = tripDates(trip);
-    const tpl = $('#t-tpl').checked;
-    dates.forEach((d, i) => { trip.days[d] = tpl ? templateDay(i, dates.length, mode) : []; });
-    if (tpl) trip.general = [newStep('Parking', 'parking', { label: mode === 'train' ? 'Parking gare' : mode === 'avion' ? 'Parking aéroport' : 'Parking' })];
-    await saveTrip(trip);
-    // rattacher tout de suite les notes déjà saisies sur ces dates
-    const n = await autoLink(trip.id);
-    toast(n ? `Déplacement créé · ${n} note${n > 1 ? 's' : ''} déjà rattachée${n > 1 ? 's' : ''}` : 'Déplacement créé');
-    location.hash = `#/deplacement/${trip.id}`;
+    ${planSelecting ? `<p class="muted sel-help">Touchez les jours à marquer « en déplacement ».</p>` : ''}
+    ${body}
+    ${!planSelecting && todo.length ? `<div class="section-title"><h2>À faire</h2><span class="muted">${todo.length}</span></div>
+    <div class="list">${todo.slice(0, 8).map(w => `<div class="row" data-gojour="${w.day || w.trip.start}">
+      <span class="cat-ico">${w.kind === 'waiting' ? '⏳' : (CAT[w.step.cat] || CAT.autre).ico}</span>
+      <span style="min-width:0"><div class="t">${esc(w.step.label)} · ${shortDate(w.day || w.trip.start)}</div><div class="s">${w.kind === 'waiting' ? 'Facture attendue' : 'Ticket à ajouter'}</div></span>
+      <span class="r">${w.kind === 'waiting' ? '<span class="pill waiting">Attendue</span>' : '<span class="pill incomplete">À justifier</span>'}</span></div>`).join('')}</div>` : ''}
+    ${planSelecting ? `<div class="sel-bar">
+      <span>${selDates.length ? `${selDates.length} jour${selDates.length > 1 ? 's' : ''}` : 'Aucun jour'}</span>
+      ${selMarked.length ? `<button class="btn btn-small btn-danger" data-unmark>Retirer</button>` : ''}
+      <button class="btn btn-primary" data-mark ${selDates.length > selMarked.length ? '' : 'disabled'}>En déplacement</button>
+    </div>` : ''}`;
+
+  $$('[data-v]').forEach(b => b.onclick = () => { location.hash = `#/planning?v=${b.dataset.v}&d=${anchor}`; });
+  $$('[data-go]').forEach(b => b.onclick = () => { if (b.dataset.go) location.hash = `#/planning?v=${v}&d=${b.dataset.go}`; });
+  $$('[data-wk]').forEach(b => b.onclick = async () => { await DB.setMeta('planWeek', b.dataset.wk); render(); });
+  $('[data-select]').onclick = () => { planSelecting = !planSelecting; planSel.clear(); render(); };
+  $$('[data-day]').forEach(b => b.onclick = () => {
+    const d = b.dataset.day;
+    if (planSelecting) { planSel.has(d) ? planSel.delete(d) : planSel.add(d); render(); return; }
+    location.hash = `#/planning?v=jour&d=${d}`;
+  });
+  $$('[data-gojour]').forEach(r => r.onclick = () => { location.hash = `#/planning?v=jour&d=${r.dataset.gojour}`; });
+  const mb = $('[data-mark]'); if (mb) mb.onclick = () => askMarkDays(selDates.filter(d => !recs[d]));
+  const ub = $('[data-unmark]'); if (ub) ub.onclick = () => askUnmarkDays(selMarked);
+}
+
+async function viewDay(d) {
+  const exps = await DB.allExpenses();
+  const expMap = Object.fromEntries(exps.map(e => [e.id, e]));
+  const rec = (await dayRecords())[d] || null;
+  const used = await linkedExpenseIds();
+  const dayExps = exps.filter(e => e.date === d);
+  const loose = dayExps.filter(e => !used.has(e.id));
+  const hol = holidayOf(d);
+  const thumbs = {};
+  await Promise.all(dayExps.filter(e => photosOf(e).length).map(async e => { thumbs[e.id] = await photoUrl(e); }));
+  const info = dayInfo(d, rec, expMap, { [d]: dayExps });
+  const stepRow = s => {
+    const r = stepState(s, expMap);
+    const c = CAT[s.cat] || CAT.autre;
+    const e = r.linked[0];
+    const sub = r.s === 'done' ? `${esc(rowName(e))}${r.linked.length > 1 ? ` + ${r.linked.length - 1} autre${r.linked.length > 2 ? 's' : ''}` : ''}`
+      : r.s === 'waiting' ? 'Facture pas encore reçue' : r.s === 'none' ? 'Pas de frais' : 'Ajouter le ticket';
+    const right = r.s === 'done' ? `<span class="step-ok"><span class="amount${isNP(e) ? ' np-amt' : ''}">${eur.format(r.linked.reduce((a, x) => a + (x.amount || 0), 0))}</span><i class="check" aria-label="Justifiée">✓</i></span>`
+      : r.s === 'waiting' ? '<span class="pill waiting">Attendue</span>' : r.s === 'none' ? '<span class="pill none">Pas de frais</span>' : '<span class="pill incomplete">À justifier</span>';
+    return `<div class="row step ${r.s}" data-step="${s.id}"><span class="cat-ico">${r.s === 'waiting' ? '⏳' : c.ico}</span>
+      <span style="min-width:0"><div class="t">${esc(s.label)}</div><div class="s">${sub}</div></span><span class="r">${right}</span></div>`;
   };
-  const del = $('[data-del]');
-  if (del) del.onclick = async () => {
-    if (!(await confirmSheet({ title: 'Supprimer ce déplacement ?', text: `« ${esc(t.title || 'Déplacement')} » et ses étapes iront dans l'historique des suppressions. Les notes de frais elles-mêmes sont conservées dans vos mois.` }))) return;
-    t.deleted = true; t.deleted_at = new Date().toISOString(); await saveTrip(t);
-    location.hash = '#/deplacements';
-    toast('Déplacement supprimé', { label: 'Annuler', fn: async () => { const x = await DB.getTrip(t.id); x.deleted = false; x.deleted_at = null; await saveTrip(x); location.hash = `#/deplacement/${t.id}`; } });
-  };
+  const prev = addDays(d, -1) >= PLAN_MIN + '-01' ? addDays(d, -1) : '', next = addDays(d, 1) <= PLAN_MAX + '-31' ? addDays(d, 1) : '';
+  view.className = 'narrow';
+  view.innerHTML = `
+    <div class="topbar"><div><h1>Planning</h1></div>${topRight()}</div>
+    <div class="segmented plan-seg">${[['mois', 'Mois'], ['semaine', 'Semaine'], ['jour', 'Jour']].map(([k, l]) => `<button data-v="${k}" aria-pressed="${k === 'jour'}">${l}</button>`).join('')}</div>
+    <div class="plan-nav">
+      <button class="btn" data-go="${prev}" ${prev ? '' : 'disabled'} aria-label="Jour précédent">‹</button>
+      <h2>${longDay(d)}</h2>
+      <button class="btn" data-go="${next}" ${next ? '' : 'disabled'} aria-label="Jour suivant">›</button>
+    </div>
+    ${hol ? `<p class="muted" style="text-align:center;margin:-6px 0 12px">Jour férié · ${esc(hol)}</p>` : ''}
+    ${rec ? `
+      <div class="ticket compact day-card"><div class="mc-head"><div><div class="label">En déplacement · total justifié</div><div class="big num">${eurParts(info.amount).split(',')[0]}<small>,${eurParts(info.amount).split(',')[1]} €</small></div></div>
+        <span class="pill ${info.cls === 'ok' ? 'remboursee' : info.cls === 'wait' ? 'waiting' : info.cls === 'plan' ? 'declaree' : 'incomplete'}">${info.cls === 'ok' ? 'Complet' : info.cls === 'wait' ? 'Facture attendue' : info.cls === 'plan' ? 'Prévu' : `${info.todo} à justifier`}</span></div></div>
+      <div class="list">${(rec.days[d] || []).map(stepRow).join('')}<button class="row add-step" data-add><span class="cat-ico">＋</span><span class="t">Ajouter une étape</span></button></div>`
+    : `<div class="card off-day"><b>Pas en déplacement</b><p class="muted">Marquez ce jour pour y ajouter les étapes habituelles (transport, repas, hôtel…).</p>
+        <button class="btn btn-primary btn-block" data-markday style="margin-top:12px">Marquer en déplacement</button></div>`}
+    ${loose.length ? `<div class="section-title"><h2>${rec ? 'Tickets à rattacher' : 'Tickets de ce jour'}</h2>${rec ? '<button class="linkish" data-autolink>Tout rattacher</button>' : ''}</div>
+      <div class="list">${loose.map(e => `<div class="row" data-loose="${e.id}">${thumbHtml(e, thumbs[e.id])}<span style="min-width:0"><div class="t">${esc(rowTitle(e))}</div><div class="s">${esc(rowName(e))}</div></span><span class="r"><div class="amount">${e.amount > 0 ? eur.format(e.amount) : '— €'}</div>${rec ? '<span class="pill declaree">Rattacher</span>' : ''}</span></div>`).join('')}</div>` : ''}
+    ${rec ? '<button class="btn btn-danger btn-block" data-unmarkday style="margin-top:20px">Retirer ce jour du planning</button>' : ''}`;
+
+  $$('[data-v]').forEach(b => b.onclick = () => { location.hash = `#/planning?v=${b.dataset.v}&d=${d}`; });
+  $$('[data-go]').forEach(b => b.onclick = () => { if (b.dataset.go) location.hash = `#/planning?v=jour&d=${b.dataset.go}`; });
+  bindRows(exps);
+  if (rec) {
+    $$('[data-step]').forEach(r => r.onclick = () => openStepMenu(rec, r.dataset.step, d, expMap));
+    $('[data-add]').onclick = () => openAddStep(rec, d);
+    $$('[data-loose]').forEach(r => r.onclick = ev => { if (ev.target.closest('[data-view]')) return; openAttach(rec, expMap[r.dataset.loose], expMap); });
+    const al = $('[data-autolink]'); if (al) al.onclick = async () => { const n = await autoLink(rec.id); toast(n ? `${n} ticket${n > 1 ? 's' : ''} rattaché${n > 1 ? 's' : ''}` : 'Aucune étape correspondante : rattachez-les à la main'); render(); };
+    $('[data-unmarkday]').onclick = () => askUnmarkDays([d]);
+  } else {
+    $('[data-markday]').onclick = () => askMarkDays([d]);
+    $$('[data-loose]').forEach(r => r.onclick = ev => { if (ev.target.closest('[data-view]')) return; location.hash = `#/note/${r.dataset.loose}`; });
+  }
 }
 
 // Rattache les notes non rattachées aux étapes « à justifier » du même jour et du même type
@@ -1279,66 +1456,6 @@ async function autoLink(tripId) {
   }
   if (n) await saveTrip(t);
   return n;
-}
-
-// ---------- Détail d'un déplacement ----------
-async function viewTrip(id) {
-  const t = await DB.getTrip(id);
-  if (!t || t.deleted) { location.hash = '#/deplacements'; return; }
-  const exps = await DB.allExpenses();
-  const expMap = Object.fromEntries(exps.map(e => [e.id, e]));
-  const used = await linkedExpenseIds();
-  const st = tripStats(t, expMap);
-  const loose = exps.filter(e => !used.has(e.id) && e.date >= t.start && e.date <= t.end).sort((a, b) => a.date.localeCompare(b.date));
-  const thumbs = {};
-  const allLinked = []; eachStep(t, s => stepState(s, expMap).linked.forEach(e => allLinked.push(e)));
-  await Promise.all([...allLinked, ...loose].filter(e => photosOf(e).length).map(async e => { thumbs[e.id] = await photoUrl(e); }));
-
-  const stepRow = (s, d) => {
-    const r = stepState(s, expMap);
-    const c = CAT[s.cat] || CAT.autre;
-    const e = r.linked[0];
-    const sub = r.s === 'done' ? `${esc(rowName(e))}${r.linked.length > 1 ? ` + ${r.linked.length - 1} autre${r.linked.length > 2 ? 's' : ''}` : ''}`
-      : r.s === 'waiting' ? 'Facture pas encore reçue' : r.s === 'none' ? 'Pas de frais' : 'Ajouter le ticket';
-    const right = r.s === 'done' ? `<span class="step-ok"><span class="amount${isNP(e) ? ' np-amt' : ''}">${eur.format(r.linked.reduce((a, x) => a + (x.amount || 0), 0))}</span><i class="check" aria-label="Justifiée">✓</i></span>`
-      : r.s === 'waiting' ? '<span class="pill waiting">Attendue</span>' : r.s === 'none' ? '<span class="pill none">Pas de frais</span>' : '<span class="pill incomplete">À justifier</span>';
-    return `<div class="row step ${r.s}" data-step="${s.id}" data-day="${d || ''}">
-      <span class="cat-ico">${r.s === 'waiting' ? '⏳' : c.ico}</span>
-      <span style="min-width:0"><div class="t">${esc(s.label)}</div><div class="s">${sub}</div></span>
-      <span class="r">${right}</span></div>`;
-  };
-  const addRow = d => `<button class="row add-step" data-add="${d || ''}"><span class="cat-ico">＋</span><span class="t">Ajouter une étape</span></button>`;
-
-  view.className = 'narrow';
-  view.innerHTML = `
-    <div class="topbar"><button class="back" data-back><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>Déplacements</button><button class="btn btn-small" data-edit>Modifier</button></div>
-    <h1>${esc(t.title || 'Déplacement')}</h1>
-    <div class="sub muted" style="margin:4px 0 14px">${longDay(t.start)}${t.end !== t.start ? ' → ' + longDay(t.end) : ''}</div>
-    <div class="ticket trip-ticket">
-      <div class="label">Total justifié</div>
-      <div class="big num">${eurParts(st.amount).split(',')[0]}<small>,${eurParts(st.amount).split(',')[1]} €</small></div>
-      <div class="progress" aria-hidden="true" style="margin-top:10px"><i class="p1" style="width:${st.steps ? st.done / st.steps * 100 : 0}%"></i><i class="p3" style="width:${st.steps ? st.none / st.steps * 100 : 0}%"></i><i class="p4" style="width:${st.steps ? st.waiting / st.steps * 100 : 0}%"></i></div>
-      <div class="split">
-        <div>Justifiées<b class="num">${st.done}/${st.steps}</b></div>
-        <div>Attendues<b class="num">${st.waiting}</b></div>
-        <div>À justifier<b class="num">${st.todo}</b></div>
-      </div>
-    </div>
-    ${tripDates(t).map(d => `<section class="day"><div class="day-head"><h2>${longDay(d)}</h2></div>
-      <div class="list">${(t.days[d] || []).map(s => stepRow(s, d)).join('')}${addRow(d)}</div></section>`).join('')}
-    <section class="day"><div class="day-head"><h2>Frais du déplacement</h2><span class="muted">parking, péage, carburant…</span></div>
-      <div class="list">${(t.general || []).map(s => stepRow(s, null)).join('')}${addRow(null)}</div></section>
-    ${loose.length ? `<section class="day"><div class="day-head"><h2>Notes à rattacher</h2><button class="linkish" data-autolink>Tout rattacher</button></div>
-      <div class="list">${loose.map(e => `<div class="row" data-loose="${e.id}">${thumbHtml(e, thumbs[e.id])}<span style="min-width:0"><div class="t">${esc(rowTitle(e))}</div><div class="s">${esc(rowName(e))}</div></span><span class="r"><div class="amount">${e.amount > 0 ? eur.format(e.amount) : '— €'}</div><span class="pill declaree">Rattacher</span></span></div>`).join('')}</div></section>` : ''}`;
-
-  $('[data-back]').onclick = () => { location.hash = '#/deplacements'; };
-  $('[data-edit]').onclick = () => { location.hash = `#/deplacement/${t.id}/modifier`; };
-  const al = $('[data-autolink]');
-  if (al) al.onclick = async () => { const n = await autoLink(t.id); toast(n ? `${n} note${n > 1 ? 's' : ''} rattachée${n > 1 ? 's' : ''}` : 'Aucune étape correspondante : rattachez-les à la main ci-dessous'); render(); };
-  bindRows(exps);
-  $$('[data-step]').forEach(r => r.onclick = ev => { if (ev.target.closest('[data-view]')) return; openStepMenu(t, r.dataset.step, r.dataset.day || null, expMap); });
-  $$('[data-add]').forEach(b => b.onclick = () => openAddStep(t, b.dataset.add || null));
-  $$('[data-loose]').forEach(r => r.onclick = ev => { if (ev.target.closest('[data-view]')) return; openAttach(t, expMap[r.dataset.loose], expMap); });
 }
 
 function findStep(t, stepId) {
@@ -1525,6 +1642,48 @@ async function viewHistory() {
   };
 }
 
+// ---------------------------------------------------------------- clôture du mois (FIN) et dossier Archives
+// Les mois clôturés sont gardés dans un enregistrement de réglages synchronisé (stockage « trips », id cfg-months)
+async function closedMonths() { const r = await DB.getTrip('cfg-months'); return (r && !r.deleted && r.closed) || {}; }
+async function setClosed(mk, on) {
+  const r = (await DB.getTrip('cfg-months')) || { id: 'cfg-months', kind: 'config', start: '0000-00-00', end: '0000-00-00', days: {}, general: [], deleted: false, closed: {} };
+  r.closed = r.closed || {};
+  if (on) r.closed[mk] = new Date().toISOString(); else delete r.closed[mk];
+  await saveTrip(r);
+}
+
+async function closeMonth(mk, inMonth) {
+  const s = sums(inMonth);
+  const notPaid = inMonth.filter(e => !isNP(e) && e.status !== 'remboursee');
+  const ver = inMonth.filter(e => e.verified === false || isIncomplete(e)).length;
+  const warn = [notPaid.length ? `${notPaid.length} note${notPaid.length > 1 ? 's ne sont' : ' n\'est'} pas encore remboursée${notPaid.length > 1 ? 's' : ''} (${eur.format(notPaid.reduce((a, e) => a + (e.amount || 0), 0))}).` : '', ver ? `${ver} note${ver > 1 ? 's' : ''} à vérifier ou à compléter.` : ''].filter(Boolean).join(' ');
+  if (!(await confirmSheet({ title: `Clôturer ${monthLabel(mk)} (FIN) ?`, text: `${inMonth.length} note${inMonth.length > 1 ? 's' : ''} · ${eur.format(s.total)}${s.npCount ? ` + ${eur.format(s.np)} non pris en compte` : ''}.<br>Le mois et ses notes seront rangés dans le dossier Archives. ${warn ? `<br><b>${warn}</b>` : 'Tout est remboursé.'}`, ok: 'Clôturer le mois', danger: false }))) return;
+  await setClosed(mk, true);
+  toast(`${monthName(mk)} clôturé et archivé`, { label: 'Annuler', fn: async () => { await setClosed(mk, false); render(); } });
+  location.hash = '#/archives';
+}
+
+async function viewArchives() {
+  const closed = await closedMonths();
+  const all = await DB.allExpenses();
+  const months = Object.keys(closed).sort().reverse();
+  view.className = 'narrow';
+  view.innerHTML = `
+    <div class="topbar"><button class="back" data-back><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>Mois</button>${topRight()}</div>
+    <h1>Archives</h1>
+    <p class="muted" style="margin:4px 0 16px">Les mois clôturés (FIN), rangés avec leurs notes et leurs photos.</p>
+    ${months.length ? `<div class="folders">${months.map(mk => {
+      const items = all.filter(e => mOf(e) === mk);
+      const x = sums(items);
+      const left = x.total - x.remboursee;
+      return `<a class="folder" href="#/mois?m=${mk}">
+        <span class="f-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+        <span class="f-body"><b>${monthName(mk)}</b><small>${items.length} note${items.length > 1 ? 's' : ''} · ${eur.format(x.total)} · clôturé le ${new Date(closed[mk]).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</small></span>
+        <span class="pill ${left < 0.005 ? 'remboursee' : 'a_declarer'}">${left < 0.005 ? 'Remboursé' : eur.format(left) + ' en attente'}</span></a>`;
+    }).join('')}</div>` : `<div class="list empty"><b>Aucun mois archivé</b>Quand un mois est terminé, ouvrez-le dans l'onglet Mois et touchez « Clôturer le mois (FIN) ».</div>`}`;
+  $('[data-back]').onclick = () => { location.hash = '#/mois'; };
+}
+
 // ---------------------------------------------------------------- doublons
 const dupKey = e => `${e.date}|${(e.amount || 0).toFixed(2)}`;
 function findDuplicate(e, all) {
@@ -1545,8 +1704,8 @@ function downloadFile(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 
-async function exportCSV() {
-  const all = (await DB.allExpenses()).sort((a, b) => a.date.localeCompare(b.date));
+async function exportCSV(onlyMonth) {
+  const all = (await DB.allExpenses()).filter(e => !onlyMonth || mOf(e) === onlyMonth).sort((a, b) => a.date.localeCompare(b.date));
   const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const num = n => (n || 0).toFixed(2).replace('.', ',');
   const lines = [['Mois de déclaration', 'Date', 'Type', 'Lieu', 'Chantier / remarque', 'Montant TTC (€)', 'Statut', 'Compté dans le remboursement', 'Remboursée le', 'Photos'].map(q).join(';')];
@@ -1556,7 +1715,7 @@ async function exportCSV() {
       isIncomplete(e) ? 'À compléter' : isNP(e) ? 'Non pris en compte (sans facture)' : STATUS[e.status], isNP(e) ? 'non' : 'oui',
       e.reimbursed_on ? e.reimbursed_on.split('-').reverse().join('/') : '', photosOf(e).length].map((v, i) => i === 5 ? v : q(v)).join(';'));
   });
-  downloadFile(new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' }), `notes-de-frais-${todayKey()}.csv`);
+  downloadFile(new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' }), `notes-de-frais-${onlyMonth || todayKey()}.csv`);
 }
 
 async function exportBackup() {
@@ -1590,25 +1749,24 @@ async function importBackup(file) {
 // ---------------------------------------------------------------- routeur
 async function render() {
   releaseUrls();
-  const [path, qs] = (location.hash || '#/deplacements').slice(1).split('?');
+  const [path, qs] = (location.hash || '#/planning').slice(1).split('?');
   const params = new URLSearchParams(qs || '');
   const parts = path.split('/').filter(Boolean);
-  let route = parts[0] || 'deplacements';
+  let route = parts[0] || 'planning';
   if (route === 'accueil' || route === 'tableau') route = 'mois';           // anciens liens
-  if (route === 'planning') route = 'reglages';
-  const tab = { deplacement: 'deplacements', note: '', historique: 'reglages', relecture: 'mois' }[route] ?? route;
+  if (route === 'deplacements') route = 'planning';
+  const tab = { deplacement: 'planning', note: '', historique: 'reglages', relecture: 'mois', archives: 'mois' }[route] ?? route;
   $$('[data-tab]').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
   if (route === 'note') {
     await viewForm(parts[1] === 'new' ? null : parts[1], { date: params.get('date'), place: params.get('place'), cat: params.get('cat'), note: params.get('note'), trip: params.get('trip'), step: params.get('step') });
   } else if (route === 'deplacement') {
-    if (parts[1] === 'new') await viewTripForm(null);
-    else if (parts[2] === 'modifier') await viewTripForm(parts[1]);
-    else await viewTrip(parts[1]);
+    location.replace((parts[1] || '').startsWith('day-') ? `#/planning?v=jour&d=${parts[1].slice(4)}` : '#/planning'); return;
   } else if (route === 'mois') await viewMonth(params);
   else if (route === 'reglages') await viewSettings();
   else if (route === 'historique') await viewHistory();
   else if (route === 'relecture') await viewReview(params);
-  else await viewTrips();
+  else if (route === 'archives') await viewArchives();
+  else await viewPlanning(params);
   view.scrollTop = 0; window.scrollTo(0, 0);
   // barre de titre compacte façon iPhone, visible quand le grand titre sort de l'écran
   const h1 = $('#view h1');
@@ -1660,6 +1818,7 @@ window.addEventListener('hashchange', render);
 // ---------------------------------------------------------------- démarrage
 (async function start() {
   await DB.requestPersistence();
+  try { await migrateTripsToDays(); } catch (err) { console.warn('Migration des déplacements', err); }
   await render();
   refreshBadges();
   Sync.startAutoSync();

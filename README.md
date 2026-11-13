@@ -167,3 +167,12 @@ L'app n'a plus que deux onglets, avec le bouton **+** au centre. Les Réglages s
 | `sw.js` | Mise en cache pour l'ouverture sans réseau |
 | `manifest.webmanifest`, `icons/` | Icône et installation sur l'écran d'accueil |
 | `supabase-setup.sql` | Création de la base privée (étape 4) |
+
+## Version 1.9 : Planning, clôture (FIN) et Archives
+
+- L'onglet **Planning** remplace Déplacements : calendrier de 2026 et 2027, affichable par mois (par défaut), semaine (lun–ven ou complète) ou jour. Jours fériés indiqués.
+- **Sélectionner** → touchez les jours → **En déplacement** → choisissez En train / En voiture / En avion / Sans étapes. Les étapes habituelles sont ajoutées toutes seules (aller le 1er jour, retour le dernier, hôtel les nuits, parking le 1er jour).
+- Couleurs : vert = tout justifié, orange = à justifier (chiffre = nombre d'étapes manquantes), ⏳ = facture attendue, bleu = prévu.
+- Les anciens déplacements nommés sont convertis automatiquement en jours marqués.
+- Onglet **Mois** → **Clôturer le mois (FIN)** : le mois est rangé dans le dossier **Archives** (icône dossier en haut, ou menu des mois). Un mois archivé reste consultable et exportable ; **Rouvrir** le remet en cours.
+- Les mois clôturés se synchronisent entre iPhone et PC (table `trips`, déjà créée en 1.7).
