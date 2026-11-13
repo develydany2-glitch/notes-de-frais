@@ -1,6 +1,6 @@
 // Service worker : met l'application en cache pour qu'elle s'ouvre sans réseau.
 // Changer VERSION à chaque mise à jour du code pour que les appareils la récupèrent.
-const VERSION = 'v1.7.0';
+const VERSION = 'v1.7.1';
 const CACHE = `notes-de-frais-${VERSION}`;
 const ASSETS = [
   './', './index.html', './styles.css', './manifest.webmanifest',
@@ -13,8 +13,13 @@ const OCR_CACHE = 'notes-de-frais-lecteur-1';
 const OCR_FILES = /tesseract-core-.*\.wasm\.js$|fra\.traineddata\.gz$/;
 
 self.addEventListener('install', ev => {
-  // cache: 'reload' = toujours la dernière version publiée, jamais une copie gardée par le navigateur
-  ev.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS.map(u => new Request(u, { cache: 'reload' })))));
+  // cache: 'reload' = toujours la dernière version publiée, jamais une copie gardée par le navigateur.
+  // Chaque fichier est mis en cache séparément : un fichier manquant sur GitHub ne bloque plus la mise à jour.
+  ev.waitUntil(caches.open(CACHE).then(c => Promise.all(ASSETS.map(u =>
+    c.add(new Request(u, { cache: 'reload' })).catch(() => console.warn('Fichier absent, non mis en cache :', u))
+  ))));
+  // Version de rattrapage : s'active tout de suite pour débloquer les iPhone restés sur une ancienne version
+  self.skipWaiting();
 });
 
 self.addEventListener('activate', ev => {

@@ -915,7 +915,7 @@ async function viewSettings() {
       <h3 style="margin-top:8px">Sur le PC</h3>
       <p class="muted" style="margin-top:4px">Ouvrez la même adresse dans Edge ou Chrome, puis menu ⋯ › Applications › Installer cette application.</p>
     </div>
-    <p class="muted" style="text-align:center;margin-top:18px">Version 1.7 · <button class="linkish" id="upd" style="font-size:14px">Rechercher une mise à jour</button></p>`;
+    <p class="muted" style="text-align:center;margin-top:18px">Version 1.7.1 · <button class="linkish" id="upd" style="font-size:14px">Rechercher une mise à jour</button></p>`;
 
   const lg = $('#login');
   if (lg) lg.onclick = async () => {
