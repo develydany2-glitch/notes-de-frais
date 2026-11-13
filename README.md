@@ -131,6 +131,19 @@ L'app n'a plus que deux onglets, avec le bouton **+** au centre. Les Réglages s
 **Mise à jour Supabase (une fois)** : dans Réglages, l'app affiche le texte à copier dans Supabase › SQL Editor. Il est aussi à la fin de `supabase-setup.sql`.
 
 
+## Suppression et historique (version 1.6)
+
+* **Glisser une ligne** dans Mois : **vers la droite** pour passer à l'état suivant (À déclarer → Déclarée → Remboursée), avec « Annuler » ; **vers la gauche** pour supprimer.
+* Toute suppression (glissement, menu ⋯, bouton dans la note, étape ou déplacement) demande une **validation** qui affiche la note concernée.
+* **Historique des suppressions** (Réglages ou bas de la page Mois) : restaurer une note avec ses photos, ou la supprimer définitivement (avec une seconde validation). Les déplacements supprimés y sont aussi.
+
+
+## Rendu iPhone (version 1.7)
+
+* L'app reprend les codes de l'iPhone : grands titres avec une barre compacte quand on fait défiler, listes groupées façon Réglages, barre d'onglets translucide avec 3 boutons centrés (Déplacements · Ajouter · Mois), feuilles d'actions et confirmations iOS, couleurs système et mode sombre automatique.
+* Correctif : la page est désormais toujours servie avec les styles de sa propre version. Cela évite les icônes décalées à gauche après une mise à jour.
+
+
 ### Contenu du dossier
 
 | Fichier | Rôle |

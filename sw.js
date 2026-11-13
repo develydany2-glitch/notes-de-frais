@@ -1,6 +1,6 @@
 // Service worker : met l'application en cache pour qu'elle s'ouvre sans réseau.
 // Changer VERSION à chaque mise à jour du code pour que les appareils la récupèrent.
-const VERSION = 'v1.5.0';
+const VERSION = 'v1.7.0';
 const CACHE = `notes-de-frais-${VERSION}`;
 const ASSETS = [
   './', './index.html', './styles.css', './manifest.webmanifest',
@@ -33,10 +33,10 @@ self.addEventListener('fetch', ev => {
   // Les appels à la base cloud ne passent jamais par le cache
   if (req.method !== 'GET' || url.origin !== self.location.origin) return;
   // Pages : réseau d'abord (version à jour), cache si hors ligne
+  // Page : toujours celle de cette version (cohérente avec ses styles et scripts en cache).
+  // Les nouvelles versions arrivent par la mise à jour du service worker (bandeau « Mettre à jour »).
   if (req.mode === 'navigate') {
-    ev.respondWith(fetch(req).then(r => {
-      const copy = r.clone(); caches.open(CACHE).then(c => c.put('./index.html', copy)); return r;
-    }).catch(() => caches.match('./index.html')));
+    ev.respondWith(caches.match('./index.html').then(hit => hit || fetch(req)));
     return;
   }
   // Fichiers de l'app : cache d'abord, instantané même sans réseau

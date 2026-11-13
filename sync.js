@@ -146,12 +146,14 @@ async function push(cfg) {
           p.path = path;
         }
       }
-      const toDelete = [...(e.removed_paths || []), ...(e.deleted ? photos.filter(p => p.path).map(p => p.path) : [])];
+      // une note supprimée garde ses photos (restaurable depuis l'historique) ; seule la suppression définitive les efface
+      const purge = e.deleted && e.status === 'purge';
+      const toDelete = [...(e.removed_paths || []), ...(purge ? photos.filter(p => p.path).map(p => p.path) : [])];
       for (const path of toDelete) {
         await api(cfg, `/storage/v1/object/${BUCKET}/${path}`, { method: 'DELETE' }).catch(() => {});
         deletedPaths.push(path);
       }
-      if (e.deleted) photos.forEach(p => { p.path = null; }); // une note restaurée renverra ses photos
+      if (purge) photos.forEach(p => { p.path = null; });
     }
     const sent = { ...e, photos };
     await upsertRow(cfg, toRow(sent, uid, true));

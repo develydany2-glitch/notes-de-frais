@@ -288,6 +288,7 @@ function rowHtml(e, thumb) {
 // Lignes cliquables : la vignette ouvre les photos, le reste ouvre la note
 function bindRows(list) {
   $$('[data-id]').forEach(row => row.onclick = ev => {
+    if (row.dataset.swiped) return; // fin d'un glissement, pas un clic
     if (ev.target.closest('[data-cycle]') || ev.target.closest('[data-view]')) return;
     location.hash = `#/note/${row.dataset.id}`;
   });
@@ -375,7 +376,7 @@ async function viewForm(id, prefill = {}) {
 
       <div class="form-actions">
         ${isNew ? '' : '<button class="btn btn-danger" data-del>Supprimer</button>'}
-        <button class="btn btn-primary" data-save>${isNew ? 'Enregistrer la note' : 'Enregistrer les modifications'}</button>
+        <button class="btn btn-primary" data-save>Enregistrer</button>
       </div>`;
   };
 
@@ -478,11 +479,7 @@ async function viewForm(id, prefill = {}) {
     };
     const del = $('[data-del]');
     if (del) del.onclick = async () => {
-      if (!confirm('Supprimer cette note de frais et ses photos ?')) return;
-      e.deleted = true;
-      await saveExpense(e, { photoChanged: true });
-      location.hash = `#/mois?m=${mOf(e)}`;
-      toast('Note supprimée', { label: 'Annuler', fn: async () => { const x = await DB.getExpense(e.id); x.deleted = false; await saveExpense(x, { photoChanged: true }); render(); } });
+      if (await deleteExpense(e)) location.hash = `#/mois?m=${mOf(e)}`;
     };
   };
 
@@ -547,6 +544,65 @@ async function viewForm(id, prefill = {}) {
   if (isNew && pendingPhoto) { const p = pendingPhoto; pendingPhoto = null; p.then(f => addFiles(f ? [f] : [])); }
 }
 
+// ---------------------------------------------------------------- glisser une ligne : → état suivant, ← supprimer
+const swipeHintSeen = () => { try { return localStorage.getItem('swipeHint') === '1'; } catch (_) { return false; } };
+function swipeNext(e) {
+  if (isIncomplete(e)) return { label: 'Compléter', cls: 'incomplete' };
+  if (isNP(e)) return { label: 'Ajouter la facture', cls: 'np' };
+  const n = STATUS_ORDER[(STATUS_ORDER.indexOf(e.status) + 1) % 3];
+  return { label: STATUS[n], cls: n };
+}
+async function swipeAdvance(e) {
+  if (isIncomplete(e) || isNP(e)) { location.hash = `#/note/${e.id}`; return; }
+  const prev = e.status;
+  const next = STATUS_ORDER[(STATUS_ORDER.indexOf(prev) + 1) % 3];
+  await setStatus([e.id], next);
+  toast(`${e.place || (CAT[e.category] || CAT.autre).label} : ${STATUS[next]}`, { label: 'Annuler', fn: async () => { await setStatus([e.id], prev); render(); } });
+  render();
+}
+function bindSwipes(list) {
+  const LIMIT = 90;
+  $$('.swipe').forEach(w => {
+    const row = w.querySelector('.row');
+    const e = list.find(x => x.id === w.dataset.sw);
+    let x0 = 0, y0 = 0, dx = 0, tracking = false, axis = null;
+    const reset = () => { row.style.transition = 'transform .22s ease'; row.style.transform = ''; w.classList.remove('to-left', 'to-right', 'armed'); };
+    row.addEventListener('pointerdown', ev => {
+      if (ev.button > 0 || ev.target.closest('.more')) return;
+      x0 = ev.clientX; y0 = ev.clientY; dx = 0; tracking = true; axis = null;
+      row.style.transition = 'none';
+    });
+    row.addEventListener('pointermove', ev => {
+      if (!tracking) return;
+      const mx = ev.clientX - x0, my = ev.clientY - y0;
+      if (!axis) {
+        if (Math.abs(mx) < 8 && Math.abs(my) < 8) return;
+        axis = Math.abs(mx) > Math.abs(my) ? 'x' : 'y';
+        if (axis === 'y') { tracking = false; return; }
+        try { row.setPointerCapture(ev.pointerId); } catch (_) {}
+      }
+      dx = mx;
+      row.style.transform = `translateX(${dx}px)`;
+      w.classList.toggle('to-right', dx > 0); w.classList.toggle('to-left', dx < 0);
+      w.classList.toggle('armed', Math.abs(dx) > LIMIT);
+    });
+    const end = async () => {
+      if (!tracking) return;
+      tracking = false;
+      if (axis !== 'x') return;
+      row.dataset.swiped = '1'; setTimeout(() => { delete row.dataset.swiped; }, 350);
+      if (dx > LIMIT) { row.style.transition = 'transform .18s ease'; row.style.transform = 'translateX(100%)'; await new Promise(r => setTimeout(r, 160)); await swipeAdvance(e); return; }
+      if (dx < -LIMIT) {
+        row.style.transition = 'transform .18s ease'; row.style.transform = 'translateX(-100%)';
+        if (await deleteExpense(e)) { render(); return; }  // message de validation, puis historique
+      }
+      reset();
+    };
+    row.addEventListener('pointerup', end);
+    row.addEventListener('pointercancel', () => { tracking = false; reset(); });
+  });
+}
+
 // ---------------------------------------------------------------- vue « Mois » : une note de frais par mois
 const mOf = e => e.month || monthKey(e.date); // mois de déclaration (peut différer du mois du ticket)
 const shiftMonth = (mk, n) => { const [y, m] = mk.split('-').map(Number); const d = new Date(y, m - 1 + n, 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
@@ -566,6 +622,7 @@ function openRowMenu(e) {
   ];
   if (cur !== nat) items.push({ ico: '↺', label: `Revenir en ${monthLabel(nat)}`, sub: 'Le mois du ticket', fn: async () => { d.close(); await moveToMonth(e, nat); render(); } });
   items.push({ ico: '✎', label: 'Ouvrir la note', fn: () => { d.close(); location.hash = `#/note/${e.id}`; } });
+  items.push({ ico: '🗑', label: 'Supprimer la note', sub: 'Elle ira dans l\'historique des suppressions', danger: true, fn: async () => { if (await deleteExpense(e)) render(); } });
   menuSheet(`${esc(e.place || (CAT[e.category] || CAT.autre).label)} · ${e.amount > 0 ? eur.format(e.amount) : '— €'}`, items);
 }
 
@@ -574,6 +631,7 @@ async function viewMonth(params) {
   const m = params.get('m') || monthKey(todayKey());
   const filter = params.get('f') || 'tout';
   const dups = duplicateIds(all);
+  const nDeleted = (await deletedItems()).length;
   const inMonth = all.filter(e => mOf(e) === m);
   const nInc = inMonth.filter(isIncomplete).length, nDup = inMonth.filter(e => dups.has(e.id)).length;
   const FILTERS = [['tout', 'Tout'], ...(nInc ? [['incomplete', `À compléter · ${nInc}`]] : []), ...STATUS_ORDER.map(s => [s, STATUS[s]]), [NP, 'Non pris en compte'], ...(nDup ? [['doublons', `Doublons ? · ${nDup}`]] : [])];
@@ -608,14 +666,18 @@ async function viewMonth(params) {
   const row = e => {
     const c = CAT[e.category] || CAT.autre;
     const moved = e.month && e.month !== monthKey(e.date);
-    return `<div class="row" data-id="${e.id}">
+    const nxt = swipeNext(e);
+    return `<div class="swipe" data-sw="${e.id}">
+      <div class="sw-bg sw-next ${nxt.cls}" aria-hidden="true">${nxt.label} →</div>
+      <div class="sw-bg sw-del" aria-hidden="true">Supprimer 🗑</div>
+      <div class="row" data-id="${e.id}">
       ${thumbHtml(e, thumbs[e.id])}
       <span style="min-width:0"><div class="t">${esc(e.place || (e.category ? c.label : 'Ticket importé'))}</div>
         <div class="s">${e.category && !isNP(e) ? esc(c.label) : ''}${moved ? `${e.category && !isNP(e) ? ' · ' : ''}<span class="moved">ticket ${monthKey(e.date) < m ? 'du mois précédent' : 'du mois suivant'}</span>` : ''}${photosOf(e).length ? '' : ' · <span style="color:var(--danger)">sans photo</span>'}</div></span>
       <span class="r"><div class="amount${isNP(e) ? ' np-amt' : ''}">${e.amount > 0 ? eur.format(e.amount) : '— €'}${e.dirty ? '<i class="unsynced" title="Pas encore synchronisée"></i>' : ''}</div>
         <span class="pills">${dups.has(e.id) ? '<span class="pill dup">Doublon ?</span>' : ''}${pillHtml(e, true)}</span></span>
-      <button class="more" data-more="${e.id}" aria-label="Changer de mois">⋯</button>
-    </div>`;
+      <button class="more" data-more="${e.id}" aria-label="Actions : changer de mois, supprimer">⋯</button>
+    </div></div>`;
   };
 
   view.className = '';
@@ -660,15 +722,18 @@ async function viewMonth(params) {
         <div class="toolbar">
           <div class="filter-chips" id="flt">${FILTERS.map(([k, l]) => `<button class="chip${k === NP ? ' chip-np' : ''}" data-f="${k}" aria-pressed="${filter === k}">${l}</button>`).join('')}</div>
         </div>
+        ${Object.keys(byDay).length && !swipeHintSeen() ? '<div class="swipe-hint" id="sw-hint"><span>Glissez une ligne <b>→</b> pour passer à l\'état suivant, <b>←</b> pour la supprimer.</span><button class="linkish" id="sw-hint-ok">OK</button></div>' : ''}
         ${Object.keys(byDay).length ? Object.entries(byDay).map(([d, items]) => `<div class="day-label">${longDay(d)}</div><div class="list">${items.map(row).join('')}</div>`).join('')
           : `<div class="list empty"><b>${filter === 'tout' ? `Aucune note en ${monthLabel(m)}` : 'Aucune note dans cette catégorie'}</b>${filter === 'tout' ? 'Touchez le bouton + pour photographier ou importer un ticket.' : ''}</div>`}
-        <div class="btn-row" style="margin-top:16px"><button class="btn btn-small" data-action="import">Importer des photos</button><button class="btn btn-small" data-action="csv">Exporter pour Excel</button></div>
+        <div class="btn-row" style="margin-top:16px"><button class="btn btn-small" data-action="import">Importer des photos</button><button class="btn btn-small" data-action="csv">Exporter pour Excel</button>${nDeleted ? `<a class="btn btn-small" href="#/historique">Historique des suppressions · ${nDeleted}</a>` : ''}</div>
       </div>
     </div>`;
 
   $$('#flt button').forEach(b => b.onclick = () => { location.hash = `#/mois?m=${m}${b.dataset.f === 'tout' ? '' : '&f=' + b.dataset.f}`; });
   const on = $('#flt [aria-pressed="true"]'); if (on) on.scrollIntoView({ inline: 'center', block: 'nearest' });
   bindRows(all);
+  bindSwipes(all);
+  const hint = $('#sw-hint-ok'); if (hint) hint.onclick = () => { try { localStorage.setItem('swipeHint', '1'); } catch (_) {} $('#sw-hint').remove(); };
   $$('[data-more]').forEach(b => b.onclick = ev => { ev.stopPropagation(); openRowMenu(all.find(e => e.id === b.dataset.more)); });
   $$('[data-cycle]').forEach(b => b.onclick = async ev => {
     ev.stopPropagation();
@@ -769,6 +834,7 @@ async function viewSettings() {
   const ocrMode = await OCR.getMode();
   const needsCol = connected && ((await DB.getMeta('needsPhotosColumn', false)) || (await DB.getMeta('needsMonthColumn', false)) || (await DB.getMeta('needsTripsTable', false)));
   const prefs = await DB.getMeta('reminder', { weekday: 5, time: '16:30', interval: 2 });
+  const nDel = (await deletedItems()).length;
   const days = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
   const ocrReady = await DB.getMeta('ocrReady', false);
 
@@ -823,6 +889,8 @@ async function viewSettings() {
       <p class="muted" style="margin-top:8px">Sur le PC, ouvrez le fichier téléchargé puis « Enregistrer et fermer » dans Outlook. Une seule fois suffit.</p>
     </div>
 
+    <a class="card link-card" href="#/historique" style="margin-top:0"><b>Historique des suppressions${nDel ? ` · ${nDel}` : ''}</b><span class="muted">Restaurer une note ou un déplacement supprimé</span></a>
+
     <div class="card">
       <h2>Exports et sauvegarde</h2>
       <p>Le fichier Excel liste toutes les notes, triées par date. La sauvegarde complète inclut les photos.</p>
@@ -847,7 +915,7 @@ async function viewSettings() {
       <h3 style="margin-top:8px">Sur le PC</h3>
       <p class="muted" style="margin-top:4px">Ouvrez la même adresse dans Edge ou Chrome, puis menu ⋯ › Applications › Installer cette application.</p>
     </div>
-    <p class="muted" style="text-align:center;margin-top:18px">Version 1.5 · <button class="linkish" id="upd" style="font-size:14px">Rechercher une mise à jour</button></p>`;
+    <p class="muted" style="text-align:center;margin-top:18px">Version 1.7 · <button class="linkish" id="upd" style="font-size:14px">Rechercher une mise à jour</button></p>`;
 
   const lg = $('#login');
   if (lg) lg.onclick = async () => {
@@ -1110,9 +1178,10 @@ async function viewTripForm(id) {
   };
   const del = $('[data-del]');
   if (del) del.onclick = async () => {
-    if (!confirm('Supprimer ce déplacement ? Les notes de frais elles-mêmes sont conservées.')) return;
-    t.deleted = true; await saveTrip(t);
-    location.hash = '#/deplacements'; toast('Déplacement supprimé');
+    if (!(await confirmSheet({ title: 'Supprimer ce déplacement ?', text: `« ${esc(t.title || 'Déplacement')} » et ses étapes iront dans l'historique des suppressions. Les notes de frais elles-mêmes sont conservées dans vos mois.` }))) return;
+    t.deleted = true; t.deleted_at = new Date().toISOString(); await saveTrip(t);
+    location.hash = '#/deplacements';
+    toast('Déplacement supprimé', { label: 'Annuler', fn: async () => { const x = await DB.getTrip(t.id); x.deleted = false; x.deleted_at = null; await saveTrip(x); location.hash = `#/deplacement/${t.id}`; } });
   };
 }
 
@@ -1241,7 +1310,12 @@ function openStepMenu(t, stepId, day, expMap) {
   } else {
     items.push({ ico: '↩︎', label: 'Détacher la note de cette étape', sub: 'La note reste dans votre tableau', fn: async () => { step.expense_ids = []; step.status = 'todo'; d.close(); await saveTrip(t); render(); } });
   }
-  items.push({ ico: '🗑', label: 'Supprimer l\'étape', danger: true, fn: async () => { list.splice(list.indexOf(step), 1); d.close(); await saveTrip(t); render(); } });
+  if (r.s === 'done') r.linked.forEach(e => items.push({ ico: '🗑', label: `Supprimer la note ${eur.format(e.amount || 0)}`, sub: 'Elle ira dans l\'historique des suppressions', danger: true, fn: async () => { if (await deleteExpense(e)) render(); } }));
+  items.push({ ico: '🗑', label: 'Supprimer l\'étape', sub: r.s === 'done' ? 'Les notes rattachées restent dans vos mois' : '', danger: true, fn: async () => {
+    if (!(await confirmSheet({ title: 'Supprimer cette étape ?', text: `« ${esc(step.label)} »${day ? ' du ' + dateLabel(day) : ''} sera retirée du déplacement.${r.s === 'done' ? ' Les notes rattachées restent dans vos mois.' : ''}` }))) return;
+    const idx = list.indexOf(step); list.splice(idx, 1); await saveTrip(t); render();
+    toast('Étape supprimée', { label: 'Annuler', fn: async () => { const x = await DB.getTrip(t.id); const where = day ? x.days[day] : x.general; where.splice(idx, 0, step); await saveTrip(x); render(); } });
+  } });
   menuSheet(`${esc(step.label)}${day ? ' · ' + dateLabel(day) : ''}`, items);
 }
 
@@ -1269,6 +1343,109 @@ function openAttach(t, e, expMap) {
     } },
     { ico: '👁', label: 'Ouvrir la note', fn: () => { d.close(); location.hash = `#/note/${e.id}`; } }
   ]);
+}
+
+// ---------------------------------------------------------------- suppression avec validation + historique
+// Message de validation (remplace la fenêtre « confirm » du navigateur)
+async function confirmSheet({ title, text, ok = 'Supprimer', danger = true }) {
+  const d = $('#sheet');
+  if (d.open) { d.onclose = null; d.close(); await new Promise(r => setTimeout(r, 30)); } // laisser passer la fermeture du menu précédent
+  return new Promise(resolve => {
+    d.className = 'sheet menu';
+    d.innerHTML = `<div class="menu-box confirm" role="alertdialog" aria-labelledby="cf-t" aria-describedby="cf-x">
+      <h2 id="cf-t">${title}</h2><p id="cf-x">${text}</p>
+      <div class="confirm-actions"><button class="btn" data-no>Annuler</button><button class="btn ${danger ? 'btn-del' : 'btn-primary'}" data-yes>${ok}</button></div></div>`;
+    let done = false;
+    const finish = v => { if (done) return; done = true; d.onclose = null; if (d.open) d.close(); resolve(v); };
+    d.querySelector('[data-no]').onclick = () => finish(false);
+    d.querySelector('[data-yes]').onclick = () => finish(true);
+    d.onclick = ev => { if (ev.target === d) finish(false); };
+    d.onclose = () => finish(false); // touche Échap
+    d.showModal();
+    d.querySelector('[data-no]').focus();
+  });
+}
+
+const noteTitle = e => `${e.place || (CAT[e.category] || CAT.autre).label} · ${e.amount > 0 ? eur.format(e.amount) : '— €'} · ${dateLabel(e.date)}`;
+
+async function deleteExpense(e, { ask = true } = {}) {
+  if (ask && !(await confirmSheet({ title: 'Supprimer cette note ?', text: `<b>${esc(noteTitle(e))}</b><br>Elle ira dans l'historique des suppressions : vous pourrez la restaurer avec ses photos.` }))) return false;
+  const x = (await DB.getExpense(e.id)) || e;
+  x.deleted = true; x.deleted_at = new Date().toISOString();
+  await saveExpense(x);
+  toast('Note supprimée', { label: 'Annuler', fn: async () => { await restoreExpense(x.id); render(); } });
+  return true;
+}
+
+async function restoreExpense(id) {
+  const e = await DB.getExpense(id);
+  if (!e || e.status === 'purge') return;
+  e.deleted = false; e.deleted_at = null;
+  await saveExpense(e, { photoChanged: photosOf(e).some(p => !p.path) });
+}
+
+async function purgeExpense(id) {
+  const e = await DB.getExpense(id);
+  if (!e) return;
+  for (const p of photosOf(e)) await DB.deletePhoto(p.id);
+  e.deleted = true; e.status = 'purge'; // « purge » = supprimée définitivement, photos effacées du cloud
+  await saveExpense(e, { photoChanged: true });
+}
+
+async function deletedItems() {
+  const notes = (await DB.allExpenses({ includeDeleted: true })).filter(e => e.deleted && e.status !== 'purge').map(e => ({ kind: 'note', at: e.deleted_at || e.updated_at, e }));
+  const trips = (await DB.allTrips({ includeDeleted: true })).filter(t => t.deleted && !t.purged).map(t => ({ kind: 'trip', at: t.deleted_at || t.updated_at, t }));
+  return [...notes, ...trips].sort((a, b) => (b.at || '').localeCompare(a.at || ''));
+}
+
+async function viewHistory() {
+  const items = await deletedItems();
+  const thumbs = {};
+  await Promise.all(items.filter(i => i.kind === 'note' && photosOf(i.e).length).map(async i => { thumbs[i.e.id] = await photoUrl(i.e); }));
+  const when = at => at ? new Date(at).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+  view.className = 'narrow';
+  view.innerHTML = `
+    <div class="topbar"><button class="back" data-back><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>Retour</button>${topRight()}</div>
+    <h1>Historique des suppressions</h1>
+    <p class="muted" style="margin:6px 0 16px">Les notes et déplacements supprimés restent ici, avec leurs photos, jusqu'à ce que vous les supprimiez définitivement.</p>
+    ${items.length ? `<div class="list">${items.map(i => i.kind === 'note' ? `<div class="row hist" data-note="${i.e.id}">
+        ${thumbHtml(i.e, thumbs[i.e.id])}
+        <span style="min-width:0"><div class="t">${esc(i.e.place || (CAT[i.e.category] || CAT.autre).label)}</div><div class="s">Ticket du ${dateLabel(i.e.date)} · supprimée ${when(i.at)}</div></span>
+        <span class="r"><div class="amount">${i.e.amount > 0 ? eur.format(i.e.amount) : '— €'}</div></span>
+        <div class="hist-actions"><button class="btn btn-small" data-restore="${i.e.id}">Restaurer</button><button class="btn btn-small btn-danger" data-purge="${i.e.id}">Supprimer définitivement</button></div>
+      </div>` : `<div class="row hist">
+        <span class="cat-ico">🧳</span>
+        <span style="min-width:0"><div class="t">${esc(i.t.title || 'Déplacement')}</div><div class="s">Déplacement du ${dateLabel(i.t.start)} · supprimé ${when(i.at)}</div></span>
+        <span class="r"></span>
+        <div class="hist-actions"><button class="btn btn-small" data-trestore="${i.t.id}">Restaurer</button><button class="btn btn-small btn-danger" data-tpurge="${i.t.id}">Supprimer définitivement</button></div>
+      </div>`).join('')}</div>
+      <button class="btn btn-danger btn-block" data-empty style="margin-top:16px">Vider l'historique</button>`
+    : `<div class="list empty"><b>Aucune suppression</b>Quand vous supprimez une note ou un déplacement, il apparaît ici et peut être restauré.</div>`}`;
+
+  $('[data-back]').onclick = () => history.length > 1 ? history.back() : (location.hash = '#/mois');
+  const exps = items.filter(i => i.kind === 'note').map(i => i.e);
+  $$('[data-view]').forEach(b => b.onclick = ev => { ev.stopPropagation(); const e = exps.find(x => x.id === b.dataset.view); if (e) openNotePhotos(e); });
+  $$('[data-restore]').forEach(b => b.onclick = async () => { await restoreExpense(b.dataset.restore); const e = await DB.getExpense(b.dataset.restore); toast(`Note restaurée en ${monthLabel(mOf(e))}`); render(); });
+  $$('[data-purge]').forEach(b => b.onclick = async () => {
+    const e = exps.find(x => x.id === b.dataset.purge);
+    if (!(await confirmSheet({ title: 'Supprimer définitivement ?', text: `<b>${esc(noteTitle(e))}</b><br>La note et ses photos seront effacées sur tous vos appareils. Cette action est irréversible.`, ok: 'Supprimer définitivement' }))) return;
+    await purgeExpense(e.id); toast('Note supprimée définitivement'); render();
+  });
+  $$('[data-trestore]').forEach(b => b.onclick = async () => { const t = await DB.getTrip(b.dataset.trestore); t.deleted = false; t.deleted_at = null; await saveTrip(t); toast('Déplacement restauré'); render(); });
+  $$('[data-tpurge]').forEach(b => b.onclick = async () => {
+    const t = await DB.getTrip(b.dataset.tpurge);
+    if (!(await confirmSheet({ title: 'Supprimer définitivement ?', text: `Le déplacement « ${esc(t.title || 'Déplacement')} » sera effacé sur tous vos appareils. Les notes de frais restent dans vos mois. Cette action est irréversible.`, ok: 'Supprimer définitivement' }))) return;
+    t.purged = true; t.days = {}; t.general = []; await saveTrip(t); toast('Déplacement supprimé définitivement'); render();
+  });
+  const empty = $('[data-empty]');
+  if (empty) empty.onclick = async () => {
+    if (!(await confirmSheet({ title: 'Vider l\'historique ?', text: `${items.length} élément${items.length > 1 ? 's' : ''} ser${items.length > 1 ? 'ont' : 'a'} effacé${items.length > 1 ? 's' : ''} définitivement, photos comprises, sur tous vos appareils. Cette action est irréversible.`, ok: 'Tout supprimer définitivement' }))) return;
+    for (const i of items) {
+      if (i.kind === 'note') await purgeExpense(i.e.id);
+      else { const t = await DB.getTrip(i.t.id); t.purged = true; t.days = {}; t.general = []; await saveTrip(t); }
+    }
+    toast('Historique vidé'); render();
+  };
 }
 
 // ---------------------------------------------------------------- doublons
@@ -1342,7 +1519,7 @@ async function render() {
   let route = parts[0] || 'deplacements';
   if (route === 'accueil' || route === 'tableau') route = 'mois';           // anciens liens
   if (route === 'planning') route = 'reglages';
-  const tab = { deplacement: 'deplacements', note: '' }[route] ?? route;
+  const tab = { deplacement: 'deplacements', note: '', historique: 'reglages' }[route] ?? route;
   $$('[data-tab]').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
   if (route === 'note') {
     await viewForm(parts[1] === 'new' ? null : parts[1], { date: params.get('date'), place: params.get('place'), cat: params.get('cat'), note: params.get('note'), trip: params.get('trip'), step: params.get('step') });
@@ -1352,9 +1529,15 @@ async function render() {
     else await viewTrip(parts[1]);
   } else if (route === 'mois') await viewMonth(params);
   else if (route === 'reglages') await viewSettings();
+  else if (route === 'historique') await viewHistory();
   else await viewTrips();
   view.scrollTop = 0; window.scrollTo(0, 0);
+  // barre de titre compacte façon iPhone, visible quand le grand titre sort de l'écran
+  const h1 = $('#view h1');
+  $('#nav-title').textContent = h1 ? h1.textContent : '';
+  document.body.classList.remove('scrolled');
 }
+window.addEventListener('scroll', () => { document.body.classList.toggle('scrolled', window.scrollY > 56); }, { passive: true });
 
 // Menu du bouton « + » : photo, import depuis le téléphone, ou saisie sans photo
 function openAddMenu() {
